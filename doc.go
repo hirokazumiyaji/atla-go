@@ -6,3 +6,8 @@
 // reflection. Execution goes through database/sql with context.Context first
 // and error last, and the package never depends on a specific database driver.
 package atla
+
+// GenVersion1 lets generated code assert, at compile time, that it is built
+// against a runtime that supports generator protocol version 1.
+// For use by generated code.
+const GenVersion1 = true

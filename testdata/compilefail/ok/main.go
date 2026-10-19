@@ -22,4 +22,5 @@ func main() {
 		atla.Not(age.EQ(2)),
 	)
 	var _ atla.Opt[int64] = atla.Some[int64](1)
+	var _ = atla.GenVersion1
 }
