@@ -65,6 +65,9 @@ func (c NullColumn[T]) In(vs ...T) Pred { return c.col.In(vs...) }
 // NotIn reports whether c is none of vs. With no values it compiles to `1 = 1`.
 func (c NullColumn[T]) NotIn(vs ...T) Pred { return c.col.NotIn(vs...) }
 
+// InQuery reports whether c is one of the values sub returns.
+func (c NullColumn[T]) InQuery(sub Subquery[T]) Pred { return c.col.InQuery(sub) }
+
 // Between reports lo <= c <= hi.
 func (c NullColumn[T]) Between(lo, hi T) Pred { return c.col.Between(lo, hi) }
 

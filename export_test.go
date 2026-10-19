@@ -6,3 +6,9 @@ func resetClassifiers() {
 	defer classifiersMu.Unlock()
 	classifiers = nil
 }
+
+// NewSubqueryForTest presents sub as a single-column subquery of type T.
+// Select1 produces Subquery values once projections exist.
+func NewSubqueryForTest[T any](sub AnySubquery) Subquery[T] {
+	return Subquery[T](sub)
+}

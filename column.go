@@ -68,6 +68,9 @@ func (c Column[T]) In(vs ...T) Pred { return In[T](c, vs...) }
 // NotIn reports whether c is none of vs. With no values it compiles to `1 = 1`.
 func (c Column[T]) NotIn(vs ...T) Pred { return NotIn[T](c, vs...) }
 
+// InQuery reports whether c is one of the values sub returns.
+func (c Column[T]) InQuery(sub Subquery[T]) Pred { return inQueryOf[T](c, sub) }
+
 // Between reports lo <= c <= hi.
 func (c Column[T]) Between(lo, hi T) Pred { return betweenOf[T](c, lo, hi) }
 

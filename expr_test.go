@@ -19,6 +19,10 @@ var (
 	_ Pred                              = unary[bool]{}
 	_ Pred                              = inList{}
 	_ Pred                              = between{}
+	_ Pred                              = exists{}
+	_ Pred                              = inQuery{}
+	_ interface{ predicate() }          = exists{}
+	_ interface{ predicate() }          = inQuery{}
 	_ interface{ appendSQL(*compiler) } = Order{}
 )
 
