@@ -29,8 +29,8 @@ flowchart LR
   from `.gitignore`. In-repo cross-module development depends on it. CI also runs once
   with `GOWORK=off` so that each module is checked on its own.
 - CI (GitHub Actions): `gofmt -l`, `go vet`, `staticcheck`, `golangci-lint`,
-  `go test -race ./...` for every module, the "root go.mod has no require" check,
-  and a Postgres service container for integration tests.
+  `go test -race ./...` for every module, and the "root go.mod has no require" check.
+  The Postgres service container for integration tests is part of P5, its first user.
 
 ## P1: Runtime Core (`atla`)
 
