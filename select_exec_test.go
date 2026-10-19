@@ -459,3 +459,36 @@ func TestSelectErrorClassified(t *testing.T) {
 		})
 	}
 }
+
+func TestNilPredicateAndZeroOrderSendNothing(t *testing.T) {
+	ctx := context.Background()
+	db, s := fakedb.Open(t)
+	base := atla.NewSelect(db, userTable)
+	cases := []struct {
+		name string
+		q    atla.Select[User]
+		want string
+	}{
+		{"WhereNil", base.Where(nil), "atla: nil predicate"},
+		{"AndNil", base.Where(atla.And(uID.EQ(1), nil)), "atla: nil predicate"},
+		{"NotNil", base.Where(atla.Not(nil)), "atla: nil predicate"},
+		{"ZeroOrder", base.OrderBy(atla.Order{}), "atla: zero Order"},
+	}
+	for _, tc := range cases {
+		check := func(op string, err error) {
+			t.Helper()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s %s error = %v, want containing %q", tc.name, op, err, tc.want)
+			}
+		}
+		_, _, err := tc.q.ToSQL()
+		check("ToSQL", err)
+		_, err = tc.q.All(ctx)
+		check("All", err)
+		_, err = tc.q.First(ctx)
+		check("First", err)
+	}
+	if log := s.Log(); len(log) != 0 {
+		t.Fatalf("log = %q, want no statement sent", log)
+	}
+}

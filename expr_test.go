@@ -228,3 +228,62 @@ func TestCompilerFailKeepsFirstError(t *testing.T) {
 		t.Errorf("on error got (%q, %v), want empty", s, args)
 	}
 }
+
+func TestNilOperandFails(t *testing.T) {
+	age, _ := userCols()
+	a := age.EQ(1)
+	cases := []struct {
+		name string
+		n    node
+		want string
+	}{
+		{"AndNil", And(nil, a), "atla: nil predicate"},
+		{"AndSingleNil", And(nil), "atla: nil predicate"},
+		{"OrNil", Or(a, nil), "atla: nil predicate"},
+		{"NotNil", Not(nil), "atla: nil predicate"},
+		{"IsNullNil", IsNull[bool](nil), "atla: nil predicate"},
+		{"BinaryNil", EQExpr[int64](age, nil), "atla: nil predicate"},
+		{"ZeroOrder", Order{}, "atla: zero Order"},
+		{"AscNil", Asc[int64](nil), "atla: zero Order"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, args, err := compile(dialect.Postgres, "", tc.n)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err: got %v, want %q", err, tc.want)
+			}
+			if s != "" || args != nil {
+				t.Errorf("on error got (%q, %v), want empty", s, args)
+			}
+		})
+	}
+}
+
+func TestAlwaysTrue(t *testing.T) {
+	age, _ := userCols()
+	a := age.EQ(1)
+	cases := []struct {
+		name string
+		p    Pred
+		want bool
+	}{
+		{"EmptyAnd", And(), true},
+		{"NestedEmptyAnd", And(And()), true},
+		{"AndOfEmptyAnds", And(And(), And()), true},
+		{"OrOfEmptyAnd", Or(And()), true},
+		{"AndOfEmptyOr", And(Or()), false},
+		{"OrWithEmptyAnd", Or(a, And()), true},
+		{"EmptyOr", Or(), false},
+		{"Comparison", a, false},
+		{"AndWithComparison", And(And(), a), false},
+		{"EmptyNotIn", NotIn[int64](age), false},
+		{"Nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := alwaysTrue(tc.p); got != tc.want {
+				t.Errorf("alwaysTrue = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

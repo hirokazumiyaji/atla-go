@@ -255,3 +255,14 @@ func TestRawGroupedInLogicalAndArith(t *testing.T) {
 		{"ComparisonBare", EQ(Raw[int64]("a + b"), 3), `a + b = $1`, []any{int64(3)}},
 	})
 }
+
+func TestRawGroupedThroughSingleOperandLogical(t *testing.T) {
+	a := NewColumn[int64](`"t"`, `"a"`)
+	r := Raw[bool]("x = 1 OR y = 2")
+	runGolden(t, dialect.Postgres, []golden{
+		{"AndOfSingleOr", And(Or(r), a.EQ(1)), `((x = 1 OR y = 2) AND "t"."a" = $1)`, []any{int64(1)}},
+		{"OrOfSingleAnd", Or(And(r), a.EQ(1)), `((x = 1 OR y = 2) OR "t"."a" = $1)`, []any{int64(1)}},
+		{"NestedSingles", And(Or(And(r)), a.EQ(1)), `((x = 1 OR y = 2) AND "t"."a" = $1)`, []any{int64(1)}},
+		{"SingleOrBare", Or(r), `x = 1 OR y = 2`, nil},
+	})
+}

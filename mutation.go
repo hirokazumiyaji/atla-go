@@ -120,9 +120,12 @@ func checkColsVals(c *compiler, op, table string, cols []string, vals []any) boo
 }
 
 // checkFullTable returns [ErrUnsafeMutation] when an UPDATE or DELETE has no
-// predicate and full-table changes were not allowed.
+// effective predicate and full-table changes were not allowed. The WHERE
+// clause counts as absent when the conjunction of where is always true by
+// construction (see [alwaysTrue]), as with Where(And()), so an empty dynamic
+// filter cannot silently target every row.
 func checkFullTable(where []Pred, allowFull bool) error {
-	if len(where) == 0 && !allowFull {
+	if !allowFull && alwaysTrue(newLogical(opAnd, where)) {
 		return ErrUnsafeMutation
 	}
 	return nil
@@ -155,9 +158,10 @@ func (q Update[R]) Where(ps ...Pred) Update[R] {
 	return q
 }
 
-// AllowFullTable permits the statement to run without any predicate, which
-// updates every row of the table. Without it such a statement fails with
-// [ErrUnsafeMutation].
+// AllowFullTable permits the statement to run without an effective
+// predicate, which updates every row of the table. Without it such a
+// statement fails with [ErrUnsafeMutation]. A WHERE that is always true by
+// construction, such as Where(And()), counts as no predicate.
 func (q Update[R]) AllowFullTable() Update[R] {
 	q.allowFull = true
 	return q
@@ -165,8 +169,8 @@ func (q Update[R]) AllowFullTable() Update[R] {
 
 // ToSQL returns the SQL text and bind arguments of the statement, without
 // RETURNING. It returns [ErrEmptyUpdate] when no column is assigned and
-// [ErrUnsafeMutation] when there is no predicate and AllowFullTable was not
-// called.
+// [ErrUnsafeMutation] when there is no effective predicate and AllowFullTable
+// was not called.
 func (q Update[R]) ToSQL() (string, []any, error) {
 	return q.compile(false)
 }
@@ -270,17 +274,18 @@ func (q Delete[R]) Where(ps ...Pred) Delete[R] {
 	return q
 }
 
-// AllowFullTable permits the statement to run without any predicate, which
-// deletes every row of the table. Without it such a statement fails with
-// [ErrUnsafeMutation].
+// AllowFullTable permits the statement to run without an effective
+// predicate, which deletes every row of the table. Without it such a
+// statement fails with [ErrUnsafeMutation]. A WHERE that is always true by
+// construction, such as Where(And()), counts as no predicate.
 func (q Delete[R]) AllowFullTable() Delete[R] {
 	q.allowFull = true
 	return q
 }
 
 // ToSQL returns the SQL text and bind arguments of the statement. It returns
-// [ErrUnsafeMutation] when there is no predicate and AllowFullTable was not
-// called.
+// [ErrUnsafeMutation] when there is no effective predicate and AllowFullTable
+// was not called.
 func (q Delete[R]) ToSQL() (string, []any, error) {
 	if err := checkFullTable(q.where, q.allowFull); err != nil {
 		return "", nil, err

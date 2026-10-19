@@ -33,6 +33,17 @@ func checkNothingSent(t *testing.T, s *fakedb.Script) {
 	}
 }
 
+// checkNilPredicate asserts that run fails, without panicking, with either
+// the nil-predicate compile error or the unsafe-mutation guard error.
+func checkNilPredicate(t *testing.T, name string, run func() error) {
+	t.Helper()
+	err := run()
+	ok := err != nil && (strings.Contains(err.Error(), "atla: nil predicate") || errors.Is(err, atla.ErrUnsafeMutation))
+	if !ok {
+		t.Errorf("%s error = %v; want atla: nil predicate or ErrUnsafeMutation", name, err)
+	}
+}
+
 func TestUpdateSQL(t *testing.T) {
 	ctx := context.Background()
 
@@ -180,8 +191,12 @@ func TestUpdateGuards(t *testing.T) {
 		db, s := fakedb.Open(t)
 		cols, vals := nameUpdate()
 		for name, q := range map[string]atla.Update[User]{
-			"NoWhere":   atla.NewUpdate(db, userTable, cols, vals),
-			"EmptyCall": atla.NewUpdate(db, userTable, cols, vals).Where(),
+			"NoWhere":        atla.NewUpdate(db, userTable, cols, vals),
+			"EmptyCall":      atla.NewUpdate(db, userTable, cols, vals).Where(),
+			"EmptyAnd":       atla.NewUpdate(db, userTable, cols, vals).Where(atla.And()),
+			"NestedEmptyAnd": atla.NewUpdate(db, userTable, cols, vals).Where(atla.And(atla.And())),
+			"OrOfEmptyAnd":   atla.NewUpdate(db, userTable, cols, vals).Where(atla.Or(atla.And())),
+			"EmptyAnds":      atla.NewUpdate(db, userTable, cols, vals).Where(atla.And(), atla.And(atla.And(), atla.And())),
 		} {
 			if _, _, err := q.ToSQL(); !errors.Is(err, atla.ErrUnsafeMutation) {
 				t.Errorf("%s: ToSQL error = %v; want ErrUnsafeMutation", name, err)
@@ -203,6 +218,27 @@ func TestUpdateGuards(t *testing.T) {
 		if _, _, err := base.ToSQL(); !errors.Is(err, atla.ErrUnsafeMutation) {
 			t.Errorf("base ToSQL error = %v; want ErrUnsafeMutation", err)
 		}
+	})
+	t.Run("AllowFullTableEmptyWhere", func(t *testing.T) {
+		cols, vals := nameUpdate()
+		base := atla.NewUpdate(nil, userTable, cols, vals).AllowFullTable()
+		checkSQL(t, base.Where(atla.And()), `UPDATE "users" SET "name" = $1 WHERE 1 = 1`, "bob")
+		checkSQL(t, base.Where(atla.And(atla.And())), `UPDATE "users" SET "name" = $1 WHERE 1 = 1`, "bob")
+		checkSQL(t, base.Where(atla.Or(atla.And())), `UPDATE "users" SET "name" = $1 WHERE 1 = 1`, "bob")
+	})
+	t.Run("NilPredicate", func(t *testing.T) {
+		db, s := fakedb.Open(t)
+		cols, vals := nameUpdate()
+		for name, q := range map[string]atla.Update[User]{
+			"WhereNil":      atla.NewUpdate(db, userTable, cols, vals).Where(nil),
+			"AndNil":        atla.NewUpdate(db, userTable, cols, vals).Where(atla.And(nil, uID.EQ(7))),
+			"WhereNilAllow": atla.NewUpdate(db, userTable, cols, vals).Where(nil).AllowFullTable(),
+		} {
+			checkNilPredicate(t, name+" ToSQL", func() error { _, _, err := q.ToSQL(); return err })
+			checkNilPredicate(t, name+" Exec", func() error { _, err := q.Exec(ctx); return err })
+			checkNilPredicate(t, name+" Save", func() error { _, err := q.Save(ctx); return err })
+		}
+		checkNothingSent(t, s)
 	})
 	t.Run("AllowFullTableExecAndSave", func(t *testing.T) {
 		db, s := fakedb.Open(t)
@@ -254,8 +290,12 @@ func TestDelete(t *testing.T) {
 	t.Run("NoWhere", func(t *testing.T) {
 		db, s := fakedb.Open(t)
 		for name, q := range map[string]atla.Delete[User]{
-			"NoWhere":   atla.NewDelete[User](db, userTable),
-			"EmptyCall": atla.NewDelete[User](db, userTable).Where(),
+			"NoWhere":        atla.NewDelete[User](db, userTable),
+			"EmptyCall":      atla.NewDelete[User](db, userTable).Where(),
+			"EmptyAnd":       atla.NewDelete[User](db, userTable).Where(atla.And()),
+			"NestedEmptyAnd": atla.NewDelete[User](db, userTable).Where(atla.And(atla.And())),
+			"OrOfEmptyAnd":   atla.NewDelete[User](db, userTable).Where(atla.Or(atla.And())),
+			"EmptyAnds":      atla.NewDelete[User](db, userTable).Where(atla.And(), atla.And(atla.And(), atla.And())),
 		} {
 			if _, _, err := q.ToSQL(); !errors.Is(err, atla.ErrUnsafeMutation) {
 				t.Errorf("%s: ToSQL error = %v; want ErrUnsafeMutation", name, err)
@@ -272,6 +312,24 @@ func TestDelete(t *testing.T) {
 		if _, _, err := base.ToSQL(); !errors.Is(err, atla.ErrUnsafeMutation) {
 			t.Errorf("base ToSQL error = %v; want ErrUnsafeMutation", err)
 		}
+	})
+	t.Run("AllowFullTableEmptyWhere", func(t *testing.T) {
+		base := atla.NewDelete[User](nil, userTable).AllowFullTable()
+		checkSQL(t, base.Where(atla.And()), `DELETE FROM "users" WHERE 1 = 1`)
+		checkSQL(t, base.Where(atla.And(atla.And())), `DELETE FROM "users" WHERE 1 = 1`)
+		checkSQL(t, base.Where(atla.Or(atla.And())), `DELETE FROM "users" WHERE 1 = 1`)
+	})
+	t.Run("NilPredicate", func(t *testing.T) {
+		db, s := fakedb.Open(t)
+		for name, q := range map[string]atla.Delete[User]{
+			"WhereNil":      atla.NewDelete[User](db, userTable).Where(nil),
+			"AndNil":        atla.NewDelete[User](db, userTable).Where(atla.And(nil, uID.EQ(7))),
+			"WhereNilAllow": atla.NewDelete[User](db, userTable).Where(nil).AllowFullTable(),
+		} {
+			checkNilPredicate(t, name+" ToSQL", func() error { _, _, err := q.ToSQL(); return err })
+			checkNilPredicate(t, name+" Exec", func() error { _, err := q.Exec(ctx); return err })
+		}
+		checkNothingSent(t, s)
 	})
 	t.Run("AllowFullTableExec", func(t *testing.T) {
 		db, s := fakedb.Open(t)

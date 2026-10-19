@@ -1,6 +1,9 @@
 package atla
 
-import "database/sql"
+import (
+	"database/sql"
+	"errors"
+)
 
 // node is implemented by every SQL AST node.
 type node interface {
@@ -35,8 +38,19 @@ type predicate interface {
 	predicate()
 }
 
+// errNilPredicate is reported when a nil predicate or expression is compiled
+// as an operand.
+var errNilPredicate = errors.New("atla: nil predicate")
+
+// errZeroOrder is reported when an Order without an expression is compiled.
+var errZeroOrder = errors.New("atla: zero Order")
+
 // appendOperand renders n as an operand of a binary operator.
 func appendOperand(c *compiler, n node) {
+	if n == nil {
+		c.fail(errNilPredicate)
+		return
+	}
 	if _, ok := n.(predicate); !ok {
 		n.appendSQL(c)
 		return
@@ -97,9 +111,13 @@ type unary[T any] struct {
 }
 
 func (u unary[T]) appendSQL(c *compiler) {
-	if u.prefix == "" {
+	switch {
+	case u.prefix == "":
 		appendOperand(c, u.x)
-	} else {
+	case u.x == nil:
+		c.fail(errNilPredicate)
+		return
+	default:
 		c.buf = append(c.buf, u.prefix...)
 		u.x.appendSQL(c)
 	}
@@ -120,11 +138,20 @@ const (
 	opOr  = " OR "
 )
 
-// newLogical builds a logical node, flattening operands that are logical
-// nodes with the same operator. The result never aliases ps.
+// newLogical builds a logical node. A one-operand logical operand (of
+// either operator) is first replaced by its operand, recursively, so Or(p)
+// combines exactly like p; then operands that are logical nodes with the
+// same operator are flattened. The result never aliases ps.
 func newLogical(op string, ps []Pred) logical {
 	out := make([]Pred, 0, len(ps))
 	for _, p := range ps {
+		for {
+			l, ok := p.(logical)
+			if !ok || len(l.ps) != 1 {
+				break
+			}
+			p = l.ps[0]
+		}
 		if l, ok := p.(logical); ok && l.op == op {
 			out = append(out, l.ps...)
 			continue
@@ -135,6 +162,12 @@ func newLogical(op string, ps []Pred) logical {
 }
 
 func (l logical) appendSQL(c *compiler) {
+	for _, p := range l.ps {
+		if p == nil {
+			c.fail(errNilPredicate)
+			return
+		}
+	}
 	switch len(l.ps) {
 	case 0:
 		if l.op == opAnd {
@@ -159,6 +192,31 @@ func (l logical) appendSQL(c *compiler) {
 
 func (logical) exprOf(bool) {}
 func (logical) predicate()  {}
+
+// alwaysTrue reports whether p is true for every row by construction: an
+// AND whose operands are all always true (including an empty AND, which
+// compiles to `1 = 1`), or an OR with an always-true operand. An empty OR
+// (`1 = 0`), an empty NOT IN and every other predicate are not.
+func alwaysTrue(p Pred) bool {
+	l, ok := p.(logical)
+	if !ok {
+		return false
+	}
+	if l.op == opAnd {
+		for _, q := range l.ps {
+			if !alwaysTrue(q) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, q := range l.ps {
+		if alwaysTrue(q) {
+			return true
+		}
+	}
+	return false
+}
 
 // inList renders `x IN (…)` or `x NOT IN (…)`, with each value bound as a
 // parameter. A predicate-shaped x is parenthesized (see appendOperand).
@@ -243,6 +301,10 @@ func (o Order) NullsLast() Order {
 }
 
 func (o Order) appendSQL(c *compiler) {
+	if o.expr == nil {
+		c.fail(errZeroOrder)
+		return
+	}
 	o.expr.appendSQL(c)
 	if o.desc {
 		c.buf = append(c.buf, " DESC"...)
