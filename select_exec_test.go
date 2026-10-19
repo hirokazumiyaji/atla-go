@@ -352,7 +352,7 @@ func TestCompileErrorSendsNothing(t *testing.T) {
 }
 
 // infoRecorder is an Executor wrapper that records the QueryInfo of every
-// call.
+// QueryContext and ExecContext call.
 type infoRecorder struct {
 	*sql.DB
 	infos []atla.QueryInfo
@@ -365,6 +365,15 @@ func (r *infoRecorder) QueryContext(ctx context.Context, query string, args ...a
 	}
 	r.infos = append(r.infos, qi)
 	return r.DB.QueryContext(ctx, query, args...)
+}
+
+func (r *infoRecorder) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	qi, ok := atla.QueryInfoFrom(ctx)
+	if !ok {
+		qi = atla.QueryInfo{Op: "<missing>"}
+	}
+	r.infos = append(r.infos, qi)
+	return r.DB.ExecContext(ctx, query, args...)
 }
 
 func TestQueryInfoAttached(t *testing.T) {

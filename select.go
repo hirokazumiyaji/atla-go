@@ -2,7 +2,6 @@ package atla
 
 import (
 	"context"
-	"database/sql"
 	"iter"
 	"slices"
 
@@ -197,7 +196,7 @@ func (q Select[R]) Count(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return queryValue[int64](ctx, q, sqlText, args)
+	return queryValue[int64](ctx, q.runner(), sqlText, args)
 }
 
 // countSubquery renders `(SELECT …) AS "atla_count"`.
@@ -218,7 +217,7 @@ func (q Select[R]) Exist(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return queryValue[bool](ctx, q, sqlText, args)
+	return queryValue[bool](ctx, q.runner(), sqlText, args)
 }
 
 // Iter runs the query and streams its rows. On an error it yields
@@ -231,7 +230,8 @@ func (q Select[R]) Iter(ctx context.Context) iter.Seq2[*R, error] {
 			yield(nil, err)
 			return
 		}
-		rows, err := q.query(ctx, sqlText, args)
+		run := q.runner()
+		rows, err := run.query(ctx, sqlText, args)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -240,7 +240,7 @@ func (q Select[R]) Iter(ctx context.Context) iter.Seq2[*R, error] {
 		for rows.Next() {
 			r, err := q.t.Scan(rows)
 			if err != nil {
-				yield(nil, q.wrapErr(err))
+				yield(nil, run.wrapErr(err))
 				return
 			}
 			if !yield(r, nil) {
@@ -248,82 +248,25 @@ func (q Select[R]) Iter(ctx context.Context) iter.Seq2[*R, error] {
 			}
 		}
 		if err := rows.Err(); err != nil {
-			yield(nil, q.wrapErr(err))
+			yield(nil, run.wrapErr(err))
 			return
 		}
 		if err := rows.Close(); err != nil {
-			yield(nil, q.wrapErr(err))
+			yield(nil, run.wrapErr(err))
 		}
 	}
 }
 
 // fetch runs the query and scans at most n rows, or every row when n < 0.
-func (q Select[R]) fetch(ctx context.Context, n int) (out []*R, err error) {
+func (q Select[R]) fetch(ctx context.Context, n int) ([]*R, error) {
 	sqlText, args, err := q.ToSQL()
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.query(ctx, sqlText, args)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if cerr := rows.Close(); cerr != nil && err == nil {
-			out, err = nil, q.wrapErr(cerr)
-		}
-	}()
-	for (n < 0 || len(out) < n) && rows.Next() {
-		r, serr := q.t.Scan(rows)
-		if serr != nil {
-			return nil, q.wrapErr(serr)
-		}
-		out = append(out, r)
-	}
-	if rerr := rows.Err(); rerr != nil {
-		return nil, q.wrapErr(rerr)
-	}
-	return out, nil
+	return queryRows(ctx, q.runner(), q.t.Scan, sqlText, args, n)
 }
 
-// queryValue runs a query that returns a single value, such as a COUNT, on
-// q's executor and scans the value into a T.
-func queryValue[T, R any](ctx context.Context, q Select[R], sqlText string, args []any) (v T, err error) {
-	var zero T
-	rows, err := q.query(ctx, sqlText, args)
-	if err != nil {
-		return zero, err
-	}
-	defer func() {
-		if cerr := rows.Close(); cerr != nil && err == nil {
-			v, err = zero, q.wrapErr(cerr)
-		}
-	}()
-	if !rows.Next() {
-		if rerr := rows.Err(); rerr != nil {
-			return zero, q.wrapErr(rerr)
-		}
-		return zero, ErrNotFound
-	}
-	if serr := rows.Scan(&v); serr != nil {
-		return zero, q.wrapErr(serr)
-	}
-	if rerr := rows.Err(); rerr != nil {
-		return zero, q.wrapErr(rerr)
-	}
-	return v, nil
-}
-
-// query sends sqlText to the executor with the query's QueryInfo attached.
-func (q Select[R]) query(ctx context.Context, sqlText string, args []any) (*sql.Rows, error) {
-	ctx = withQueryInfo(ctx, QueryInfo{Op: "select", Table: q.t.RawName, ReadOnly: q.lock == nil})
-	rows, err := q.ex.QueryContext(ctx, sqlText, args...)
-	if err != nil {
-		return nil, q.wrapErr(err)
-	}
-	return rows, nil
-}
-
-// wrapErr classifies a database error of the query.
-func (q Select[R]) wrapErr(err error) error {
-	return wrapDBError(q.t.Dialect, "select", q.t.RawName, err)
+// runner returns the statement plumbing of the query.
+func (q Select[R]) runner() runner {
+	return runner{ex: q.ex, d: q.t.Dialect, op: "select", table: q.t.RawName, readOnly: q.lock == nil}
 }
