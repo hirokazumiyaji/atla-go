@@ -34,14 +34,15 @@ flowchart LR
 
 ## P1: Runtime Core (`atla`)
 
-1. `Expr[T]` / sealed node interface, `Column`, `NumberColumn`, `StringColumn`,
-   `Order`, `And` / `Or` / `Not`, aggregates, `Raw`, subqueries, `Exists`.
+1. `Expr[T]` / sealed node interface, `Column`, `NumberColumn`, `StringColumn`
+   and their `Null*` variants, `Order`, generic operator functions (`atla.GT`,
+   `atla.Desc`, …), `And` / `Or` / `Not`, aggregates, `Raw`, subqueries, `Exists`.
    *Includes compile-fail tests (see Verification) for the type-safety claims.*
 2. `dialect` package (`Postgres`, `SQLite`) and the single-pass compiler, with golden
    SQL tests per dialect.
-3. `Executor`, `RunTx` (commit / rollback / panic / savepoints / options), and the
-   error sentinels, `DBError`, dialect `Classify`, and `RegisterClassifier`.
-4. `Select[R]` (`Where`, `OrderBy`, `Limit`, `Offset`, locks, `All`, `First`, `One`,
+3. `Executor`, `QueryInfo` in ctx, `TxExecutor`, `TxRunner`, `RunTx` (commit /
+   rollback / panic / savepoints / options), `GenVersionN`, and the error sentinels, `DBError`, dialect `Classify`, and `RegisterClassifier`.
+4. `Table[R]` + `RowScanner[R]` contract (needed by P4 joins, fixed now), `Select[R]` (`Where`, `OrderBy`, `Limit`, `Offset`, locks, `All`, `First`, `One`,
    `Count`, `Exist`, `Iter`, `ToSQL`), with an immutability test that branches a base
    query.
 5. `Opt[T]` and the `Insert` / `Update` / `Delete` cores (`Exec`, `Save` with
@@ -73,7 +74,7 @@ flowchart LR
 2. `LoadEdge` runtime and generated `WithXxx` / `XxxOrErr` methods. Covers nested
    configurators, composite FKs, NULL FKs, empty parents, chunking, and `Iter`
    batching.
-3. `Join` / `LeftJoin` / `Join3` / `LeftJoin3`, `Pair` / `Triple`, `ScanNullable`, and
+3. `Join` / `LeftJoin` / `Join3` / `LeftJoin3`, `Pair` / `Triple`, row scanners (`RowScanner`, nullable variant), and
    aliasing (`user.As`, `UserTable.Alias`).
 4. `Select1..Select8`, `Tuple2..Tuple8`, `GroupBy` / `Having` / `Distinct`.
 
@@ -104,7 +105,7 @@ classifier recipe for go-sql-driver, and a MySQL service container in CI.
 
 | Claim | How it is verified |
 | :--- | :--- |
-| Type mismatches do not compile | `internal/e2e/compilefail/`: each case is a tiny `main` package that must **fail** `go build` with an expected error substring (driven by a Go test that runs `go build` per case). Cases: `user.Age.EQ("20")`, `post.AuthorID.EQExpr(user.Name)`, `UserUpdate{Age: atla.Some("x")}`, assigning `Expr[int64]` to `Pred`, and setting a `Post` field in `UserUpdate`. |
+| Type mismatches do not compile | `internal/e2e/compilefail/`: each case is a tiny `main` package that must **fail** `go build` with an expected error substring (driven by a Go test that runs `go build` per case). Cases: `user.Age.EQ("20")`, `post.AuthorID.EQExpr(user.Name)`, `UserUpdate{Age: atla.Some("x")}`, assigning `Expr[int64]` to `Pred`, `user.ID.EQExpr(post.EditorID)` (nullable vs non-null without `.NotNull()`), and setting a field that does not exist on `UserUpdate`. |
 | Missing required insert fields are caught | `atlavet` `analysistest` cases plus running `go tool atlavet ./...` over the e2e module in CI. |
 | Generated code is stable | `atlagen check` in CI against the committed e2e generated code. |
 | Root module stays dependency-free | CI step: `go list -m all` in the root module prints only the module itself. |

@@ -77,6 +77,9 @@ type Column[T any] struct {
 func NewColumn[T any](table, name string) Column[T]
 func NewNumberColumn[T Number](table, name string) NumberColumn[T]
 func NewStringColumn[T ~string](table, name string) StringColumn[T]
+func NewNullColumn[T any](table, name string) NullColumn[T]
+func NewNullNumberColumn[T Number](table, name string) NullNumberColumn[T]
+func NewNullStringColumn[T ~string](table, name string) NullStringColumn[T]
 
 // Comparison with a Go value (bound as a parameter)
 func (c Column[T]) EQ(v T) Pred
@@ -135,11 +138,38 @@ and emit `ESCAPE '\'`. They match the Go `strings` naming.
 Other columns (`bool`, `time.Time`, `[]byte`, `json.RawMessage`, override types)
 use plain `Column[T]`.
 
-**Nullability** does not change the column type. A nullable `deleted_at timestamptz`
-is `atla.Column[time.Time]`: comparisons take a `time.Time`, and NULL is tested
-with `IsNull()` / `IsNotNull()`. Nullability shows up in the **model field**
-(`*time.Time` or `sql.Null[time.Time]`) and in the **write structs**
-(`atla.Opt[*time.Time]`). See §4.
+**Nullable columns** use a parallel set of kinds whose *expression type* is
+`sql.Null[T]`, while their comparison methods still take plain `T`:
+
+```go
+type NullColumn[T any] struct{ /* table, name */ }        // implements Expr[sql.Null[T]]
+func (c NullColumn[T]) EQ(v T) Pred                         // … NE/LT/LTE/GT/GTE, In, NotIn, Between
+func (c NullColumn[T]) EQExpr(e Expr[T]) Pred               // … other Expr variants
+func (c NullColumn[T]) IsNull() Pred
+func (c NullColumn[T]) IsNotNull() Pred
+func (c NullColumn[T]) NotNull() Expr[T]                    // asserts non-NULL, e.g. after IsNotNull() or for EQExpr on the other side
+func (c NullColumn[T]) Asc() Order                          // … Desc
+
+type NullNumberColumn[T Number] struct{ NullColumn[T] }     // Add/Sub/Mul/Div -> Expr[sql.Null[T]]
+type NullStringColumn[T ~string] struct{ NullColumn[T] }    // Like/ILike/Contains/HasPrefix/HasSuffix
+```
+
+So a nullable `deleted_at timestamptz` is `atla.NullColumn[time.Time]`:
+
+- `user.DeletedAt.LT(t)` takes a `time.Time`.
+- `atla.Coalesce(user.Bio, "")` type-checks.
+- `atla.Select2(q, user.ID, user.Bio)` yields `Tuple2[int64, sql.Null[string]]`, so a
+  projection can never fail at runtime on NULL.
+
+Non-nullable `Column[T]` also has `IsNull()` / `IsNotNull()`, which are needed for
+the right side of a `LEFT JOIN`. It also has `Null() Expr[sql.Null[T]]`, which
+projects a NOT NULL column of an outer-joined table safely:
+`atla.Select2(lj, user.ID, post.Title.Null())`. If you project a NOT NULL column
+from the nullable side without `.Null()` and it is NULL, the projection returns a
+scan error. It does not panic.
+
+In model fields, nullability shows as `*time.Time` or `sql.Null[time.Time]`. In the
+write structs it shows as `atla.Opt[*time.Time]` (see §4).
 
 ### 2.3 Expression Nodes (unexported)
 
@@ -182,6 +212,27 @@ func Exists(sub AnySubquery) Pred
 Aggregates that can return SQL `NULL` are typed as `sql.Null[T]`. As a result,
 scanning their projections can never fail on NULL.
 
+**Operators on arbitrary expressions.** `Expr[T]` is a sealed interface without
+exported methods, so the column methods are sugar. The general forms are generic
+free functions that accept any `Expr[T]`:
+
+```go
+func EQ[T any](e Expr[T], v T) Pred          // … NE, LT, LTE, GT, GTE
+func EQExpr[T any](a, b Expr[T]) Pred        // … other Expr variants
+func IsNull[T any](e Expr[T]) Pred
+func In[T any](e Expr[T], vs ...T) Pred
+func Add[T Number](e Expr[T], v T) Expr[T]   // … Sub, Mul, Div, AddExpr …
+func Asc[T any](e Expr[T]) Order             // … Desc
+```
+
+Examples: `Having(atla.GT(atla.Count(), 5))`,
+`OrderBy(atla.Desc(atla.Max(user.Age)))`, `atla.Add(user.Age.Add(1), 2)`.
+
+**Subqueries** come from single-column projections:
+`atla.Select1(q, post.AuthorID).Subquery()` returns `Subquery[int64]`, which is used
+as `user.ID.InQuery(sub)`. `Exists` takes any builder's `.Subquery()` result
+(`AnySubquery`).
+
 ---
 
 ## 3. Dialects & Compiler (`dialect/`, `compiler.go`)
@@ -198,8 +249,21 @@ type Dialect interface {
     Returning() bool                               // RETURNING supported
     AppendILike(b []byte, left, right func([]byte) []byte) []byte
     MaxParams() int                                // bind-parameter limit used for chunking
-    Classify(err error) error                      // driver error -> atla sentinel kind, or nil
+    Classify(err error) ErrorKind                  // driver error -> kind (KindUnknown if not recognized)
 }
+
+// ErrorKind lives in package dialect so that dialect does not import atla
+// (atla imports dialect). atla maps each kind to its sentinel error (§10).
+type ErrorKind uint8
+
+const (
+    KindUnknown ErrorKind = iota
+    KindUniqueViolation
+    KindForeignKeyViolation
+    KindNotNullViolation
+    KindCheckViolation
+    KindSerialization
+)
 
 var (
     Postgres Dialect // "ident", $n, RETURNING, native ILIKE, 65535 params
@@ -259,7 +323,8 @@ func Some[T any](v T) Opt[T]           // set to a Go value
 func SomePtr[T any](v T) Opt[*T]       // nullable column, non-NULL value (takes the address of a copy)
 func Null[T any]() Opt[*T]             // nullable column, explicit NULL
 func SetExpr[T any](e Expr[T]) Opt[T]  // set to an SQL expression, e.g. user.Age.Add(1)
-func SetExprPtr[T any](e Expr[T]) Opt[*T] // expression into a nullable column
+func SetExprPtr[T any](e Expr[T]) Opt[*T] // expression into a nullable column (wraps e in an internal
+                                           // adapter node that implements Expr[*T]; SQL is unchanged)
 
 func (o Opt[T]) IsSet() bool
 func (o Opt[T]) Get() (T, bool)
@@ -293,6 +358,23 @@ type TxBeginner interface {
 `QueryRowContext` is intentionally not required. Single-row paths use
 `QueryContext` and read at most one row, which keeps wrapper implementations small.
 
+**Query metadata travels in `ctx`.** Before every call, the runtime attaches a
+`QueryInfo` to the context:
+
+```go
+type QueryInfo struct {
+    Op       string // "select", "insert", "update", "delete", "exec"
+    Table    string // unquoted primary table
+    ReadOnly bool   // plain SELECT without locks
+}
+
+func QueryInfoFrom(ctx context.Context) (QueryInfo, bool)
+```
+
+Wrappers (hooks, replica routing; see §11) read the metadata from `ctx`, so the
+`Executor` interface stays the `database/sql` shape, and `*sql.DB` keeps working
+unwrapped.
+
 ### 5.2 Transactions
 
 The generated client exposes:
@@ -310,17 +392,35 @@ func WithIsolation(l sql.IsolationLevel) TxOption
 func ReadOnly() TxOption
 ```
 
-Behaviour:
+```go
+// TxExecutor is the Executor handed to fn inside a transaction.
+// It wraps *sql.Tx and owns the savepoint counter.
+type TxExecutor struct { /* tx *sql.Tx; depth int */ }
+func (t *TxExecutor) QueryContext(...) (*sql.Rows, error)
+func (t *TxExecutor) ExecContext(...) (sql.Result, error)
+func (t *TxExecutor) Tx() *sql.Tx // escape hatch for raw database/sql use
 
-1. If `ex` implements `TxBeginner`, the helper calls `BeginTx` and runs `fn` with the
-   `*sql.Tx`. It commits when `fn` returns `nil`. When `fn` returns an error, it rolls
-   back and returns that error, joined with any rollback error. When `fn` panics, it
-   rolls back and re-panics.
-2. If `ex` is already a `*sql.Tx` (a nested call), the helper uses
-   `SAVEPOINT atla_sp_<n>` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`, where
-   `n` is a per-transaction counter kept in a small wrapper. Passing isolation
-   options to a nested call returns an error.
-3. If `ex` is neither, the helper returns `atla.ErrTxUnsupported`.
+// TxRunner is an optional capability for Executor wrappers (hooks, routers).
+// RunTx delegates to it, so the wrapper can begin on the right underlying
+// executor and re-wrap the transaction executor it hands to fn.
+type TxRunner interface {
+    RunTx(ctx context.Context, fn func(Executor) error, opts ...TxOption) error
+}
+```
+
+`RunTx` chooses the first case that matches `ex`:
+
+1. **`TxRunner`**: delegate to it.
+2. **`*TxExecutor`** (a nested call): use `SAVEPOINT atla_sp_<depth>` /
+   `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`, and pass `fn` a child `*TxExecutor`
+   with `depth+1`. Passing isolation options to a nested call returns an error.
+3. **`*sql.Tx`** (the user passed a raw transaction): wrap it in a `*TxExecutor` with
+   depth 0, then proceed as in case 2. atla never commits a transaction it did not
+   begin.
+4. **`TxBeginner`**: call `BeginTx` and run `fn` with a new `*TxExecutor`. Commit when
+   `fn` returns `nil`. When `fn` returns an error, roll back and return that error
+   joined with any rollback error. When `fn` panics, roll back and re-panic.
+5. **Anything else**: return `atla.ErrTxUnsupported`.
 
 There is no automatic retry. `errors.Is(err, atla.ErrSerialization)` lets callers
 build their own retry loop.
@@ -334,12 +434,30 @@ build their own retry loop.
 ```go
 // Table describes a generated table to the runtime.
 type Table[R any] struct {
-    Name       string                 // quoted, possibly schema-qualified
-    SelectList string                 // precomputed `"users"."id", "users"."email", …`
+    Name       string // quoted, possibly schema-qualified
+    SelectList string // precomputed `"users"."id", "users"."email", …`
     NumCols    int
-    Scan       func(*sql.Rows) (*R, error) // generated, reflection-free
-    ScanNullable func(*sql.Rows) (*R, error) // generated for tables with a PK; returns nil when all PK cols are NULL (LEFT JOIN)
-    Alias      func(alias string) Table[R]
+
+    // Scan is the single-table fast path: one rows.Scan call into the struct.
+    Scan func(*sql.Rows) (*R, error)
+
+    // NewRowScanner supports composition. rows.Scan must receive every column of a
+    // row in one call, so a JOIN collects the targets of each table into one []any,
+    // calls rows.Scan once, and then lets each table finish its row (widen / nullptr
+    // conversions, see generator-spec §4.4).
+    NewRowScanner func() RowScanner[R]
+
+    // NewNullableRowScanner scans every column into sql.Null temporaries and reports
+    // absence (all PK columns NULL) for the nullable side of a LEFT JOIN.
+    // It is nil for tables without a primary key.
+    NewNullableRowScanner func() RowScanner[R]
+
+    Alias func(alias string) Table[R]
+}
+
+type RowScanner[R any] interface {
+    Targets(dst []any) []any // appends this table's scan destinations
+    Finish() (*R, error)     // returns nil, nil when absent (nullable scanner only)
 }
 
 // Select is the immutable core embedded by generated XxxQuery types.
@@ -384,7 +502,13 @@ func (q UserQuery) All(ctx context.Context) ([]*User, error) // sel.All + edge l
 ```
 
 `Iter` with edges loads edges per batch of 500 parents (configurable through
-`atla.IterBatch(n)`), so streaming does not turn into N+1.
+`atla.IterBatch(n)`), so streaming does not turn into N+1. Loading a batch's edges
+runs a second query while the parent `*sql.Rows` is still open. That works on
+`*sql.DB`, which uses another pooled connection. On a single connection
+(`*TxExecutor`, `*sql.Tx`, `*sql.Conn`) many drivers reject it ("conn busy"), so
+`Iter` with edges on those executors yields `atla.ErrIterEdgesSingleConn` before
+any query runs. Use `All`, or page with `Limit`/`Offset` or keyset predicates, inside
+transactions.
 
 ---
 
@@ -450,9 +574,11 @@ func (r *MembershipRepo) GetMany(ctx context.Context, keys []MembershipKey) ([]*
 ```
 
 `GetMany` returns rows in database order. Duplicates collapse and missing keys are
-omitted, as in atla. Single-column keys are chunked at 500 parameters per
-statement. Composite keys use row-value `IN` (`("org_id","user_id") IN (($1,$2),…)`)
-on Postgres and SQLite, chunked by `MaxParams / width`.
+omitted, as in atla. Composite keys use row-value `IN`
+(`("org_id","user_id") IN (($1,$2),…)`) on Postgres and SQLite.
+
+**Chunking rule** (shared by `GetMany` and edge loading): each statement carries
+`min(500, dialect.MaxParams() / keyWidth)` keys.
 
 ---
 
@@ -476,10 +602,11 @@ func (j Joined[A, B]) Iter(ctx context.Context) iter.Seq2[Pair[A, B], error]
 
 - `Selectable[R]` is implemented by `atla.Select[R]` and by every generated
   `XxxQuery` (through `Unwrap()`).
+- Joined rows are scanned by concatenating each table's `RowScanner.Targets` into
+  one destination slice, calling `rows.Scan` once, and then calling each `Finish`.
 - `LeftJoin` decides "absent" by checking whether the joined table's primary-key
-  columns are all NULL. The generated `Table.ScanNullable` scans the right side into
-  `sql.Null` temporaries for this purpose. For tables without a PK the generator
-  leaves `ScanNullable` nil, and executing a `LeftJoin` against such a table returns
+  columns are all NULL, using `Table.NewNullableRowScanner`. For tables without a
+  PK that field is nil, and executing a `LeftJoin` against such a table returns
   `atla.ErrNoPrimaryKey` before any SQL is sent.
 - **Self joins**: `m := user.As("manager")` returns a `user.Columns` value whose
   columns render as `"manager"."id"`, and `dbgen.UserTable.Alias("manager")` returns
@@ -511,15 +638,27 @@ Edges are generated from foreign keys (see `generator-spec.md` §5). The runtime
 provides the batching core:
 
 ```go
-// LoadEdge runs: SELECT … FROM child WHERE (fk cols) IN (parent keys) [AND user preds] [ORDER BY …]
-// and groups the results by foreign key. Keys are chunked by dialect.MaxParams().
-func LoadEdge[P, C any, K comparable](ctx context.Context, ex Executor, spec EdgeSpec[P, C, K], parents []*P, q Select[C]) error
+// LoadEdge collects the parents' keys, calls fetch once per key chunk with a
+// predicate `(fk cols) IN (keys)`, groups the returned children by key, and calls
+// spec.Assign for every parent (with an empty slice when it has no children).
+func LoadEdge[P, C any, K comparable](
+    ctx context.Context,
+    spec EdgeSpec[P, C, K],
+    parents []*P,
+    fetch func(ctx context.Context, in Pred) ([]*C, error),
+) error
 ```
 
 `EdgeSpec` is emitted by the generator. It holds the parent key extractor, the
 child FK extractor, the child FK columns, and the assign function. `K` is the key
 type: the column type for single-column keys, or a generated comparable struct
 (`postAuthorKey{OrgID, UserID}`) for composite keys.
+
+**Nested loading** happens through `fetch`. The generated `UserQuery.All` passes
+`func(ctx, in) { return configured.Where(in).All(ctx) }`, where `configured` is
+the `PostQuery` returned by the user's `WithPosts` configurator. That `All` loads
+the post's own edges (`WithComments`) before returning, so nesting needs no extra
+runtime machinery.
 
 Semantics (mirroring ent):
 
@@ -551,6 +690,7 @@ var (
     ErrTxUnsupported         = errors.New("atla: executor cannot begin a transaction")
     ErrReturningUnsupported  = errors.New("atla: RETURNING not supported for this table/dialect")
     ErrNoPrimaryKey          = errors.New("atla: table has no primary key")
+    ErrIterEdgesSingleConn   = errors.New("atla: Iter with edges needs a pooled executor; use All inside transactions")
 
     // Database error kinds (classified from driver errors)
     ErrUniqueViolation       = errors.New("atla: unique violation")
@@ -574,7 +714,8 @@ func (e *DBError) Unwrap() []error { return []error{e.Kind, e.Err} }
 
 So `errors.Is(err, atla.ErrUniqueViolation)` and `errors.As(err, &pgErr)` both work.
 
-**Classification without driver imports.** Each dialect's `Classify` uses
+**Classification without driver imports.** Each dialect's `Classify` returns a
+`dialect.ErrorKind`, and `atla` maps it to the sentinel above. Detection uses
 structural interfaces only:
 
 | Dialect | Detection | Codes |
@@ -585,8 +726,8 @@ structural interfaces only:
 
 Drivers without such a method (for example `mattn/go-sqlite3` and
 `go-sql-driver/mysql`) are supported through
-`atla.RegisterClassifier(func(error) error)`, which the application calls once at
-startup. The runtime cannot import those drivers, so it cannot classify their
+`atla.RegisterClassifier(func(error) dialect.ErrorKind)`, which the application calls
+once at startup. The runtime cannot import those drivers, so it cannot classify their
 errors on its own.
 
 Errors that cannot be classified are returned unchanged and are not wrapped.
@@ -605,6 +746,25 @@ them. Their detailed specs will be written when they are scheduled (see
 | Bulk insert | `client.User.InsertMany([]dbgen.UserInsert{…}).Exec(ctx)`. Rows are grouped by their set-column mask, and each group becomes a multi-row `VALUES` statement chunked by `MaxParams`. Each chunk is atomic; wrap the call in `Tx` for all-or-nothing behaviour. |
 | COPY (Postgres) | Separate module `github.com/hirokazumiyaji/atla-go/pgxcopy` (depends on pgx). It obtains the `*pgx.Conn` through `sql.Conn.Raw` and calls `CopyFrom`. The runtime defines only `atla.CopyFromer`, an optional interface checked with a type assertion. |
 | Prepared queries | `atla.Param[T](name)` slots plus `q.Prepare()`, which compiles once into `atla.Prepared[R]` and binds with `p.All(ctx, atla.Args{"min_age": 20})`. Optionally backed by `*sql.Stmt` per connection. |
-| Hooks / observability | `atla.WithHooks(ex, hooks...)` returns an `Executor` that calls `Before(ctx, QueryInfo) context.Context` / `After(ctx, QueryInfo, err)`. `QueryInfo` carries the SQL, the operation, the table, and the arg count. OpenTelemetry users can use otelsql at the driver level instead. |
-| Read replicas | `dbgen.NewClient(primary, atla.WithReplicas(r1, r2))`. The builder already knows the operation, so plain `SELECT`s outside `Tx` and without locks go to a replica, and everything else goes to the primary. No SQL regex is needed, unlike atla's `RoutingAdapter`. |
+| Hooks / observability | `atla.WithHooks(ex, hooks...)` returns an `Executor` (also implementing `TxRunner`, §5.2) that calls `Before(ctx, QueryInfo, sql) context.Context` / `After(ctx, QueryInfo, err)`, reading `QueryInfo` from `ctx` (§5.1). OpenTelemetry users can use otelsql at the driver level instead. |
+| Read replicas | `atla.NewRouter(primary, replicas...)` returns an `Executor` + `TxRunner`. Queries whose `QueryInfo.ReadOnly` is true go to a replica, and everything else goes to the primary. Transactions always begin on the primary, so their queries reach a `*TxExecutor`, never the router. No SQL regex is needed, unlike atla's `RoutingAdapter`, and `NewClient` stays option-free. |
 | M2M edges | Join tables detected as "PK = two FKs, no other non-default columns" become `User.WithGroups()` (two queries: join table + target). |
+
+---
+
+## 12. Versioning Between Runtime and Generated Code
+
+Generated code uses runtime APIs that application code normally does not touch:
+`Table` fields, `RowScanner`, the column constructors, `EdgeSpec` / `LoadEdge`, and
+the `Select` / mutation cores. The rules:
+
+1. The two modules are released **in lockstep** with the same version number. Tags
+   are `vX.Y.Z` for the root module and `atlagen/vX.Y.Z` for the tooling module.
+2. The runtime exports a constant per generated-code contract,
+   `const GenVersion3 = true`, where 3 is an example of the number. Every generated
+   file contains `const _ = atla.GenVersion3`, so an incompatible runtime fails at
+   `go build` with an obvious name instead of with confusing type errors. This is the
+   same pattern protobuf uses with `EnforceVersion`.
+3. Before v1.0.0, generated-code APIs may change in minor releases, but only together
+   with a new `GenVersionN`. After v1.0.0 they follow semver like the public API.
+   Their godoc says "for generated code".

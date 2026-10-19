@@ -107,9 +107,10 @@ The same JSON fixtures can be used by atla and atla-go.
 | Operators | `User.age >= 20`, `&`, `\|`, `~` | `user.Age.GTE(20)`, `atla.And`, `atla.Or`, `atla.Not` | Go has no operator overloading. Methods also avoid the `__bool__` pitfall entirely. |
 | Literal vs expression operands | One `T \| Expr[T]` parameter | Two methods: `EQ(v T)` and `EQExpr(e Expr[T])` | Go has no union parameter types or overloading. |
 | Insert arguments | Required kw-only args + `= UNSET` | `UserInsert` struct: required columns are plain `T`; defaulted columns are `atla.Opt[T]`; nullable columns are `atla.Opt[*T]` | Readable and idiomatic. Missing required columns are reported by `atlavet`. |
-| Update arguments | `.set(age=User.age + 1)` | `Update(dbgen.UserUpdate{Age: atla.SetExpr(user.Age.Add(1))})` | Same struct pattern as insert. A column from another table cannot be assigned. |
+| Update arguments | `.set(age=User.age + 1)` | `Update(dbgen.UserUpdate{Age: atla.SetExpr(user.Age.Add(1))})` | Same struct pattern as insert. Only columns of the target table can be assigned, and the value types are checked. Columns that the *expression* references are not checked against the table; SQL rejects foreign references at execution time. |
 | Joined results | `tuple[UserRecord, PostRecord]` via `TypeVarTuple` | `atla.Pair[*User, *Post]` (2-way) and `atla.Triple` (3-way) | Go generics have no variadic type parameters. |
 | Projections | `select(User.id, User.email) -> tuple[int, str]` | `atla.Select2(q, user.ID, user.Email)` … `Select8` returning `atla.Tuple2[int64, string]` … | Same reason. Generic *functions* are used because Go methods cannot declare type parameters. |
+| Nullable columns | `Column[T \| None]` | `NullColumn[T]` (and `NullNumberColumn` / `NullStringColumn`). Comparisons take `T`; the expression type is `sql.Null[T]`. | Projections and `Coalesce` of nullable columns are type-safe and cannot fail on NULL. |
 | Builder immutability | `__slots__` + tuple copies | Value-type builders. Every method returns a modified copy, and slices are cloned before append. | A base query stored in a variable can be branched safely. |
 | Transactions | `async with db.transaction() as tx:` | `client.Tx(ctx, func(tx *dbgen.Client) error { … })` | Commit on `nil`, rollback on error or panic. Nested calls use `SAVEPOINT`. |
 | Eager loading | `preload(...)` returns tuples | ent-style `WithPosts()`. Results go in `u.Edges.Posts`, and `u.Edges.PostsOrErr()` returns `atla.ErrNotLoaded` when the edge was not requested. | Familiar to ent users and keeps the result type `[]*User`. |
@@ -119,10 +120,14 @@ The same JSON fixtures can be used by atla and atla-go.
 
 ## 3. Repository Layout
 
-The repository has two Go modules. The runtime module has zero dependencies. The
-tooling module may depend on `golang.org/x/tools` and a YAML parser without
-leaking those into application `go.sum` files. This mirrors atla's
-`packages/atla` and `packages/atlagen` split.
+The repository has two Go modules, mirroring atla's `packages/atla` and
+`packages/atlagen` split. The runtime module has zero dependencies, so importing
+`atla` adds nothing to an application's build. The tooling module may depend on
+`golang.org/x/tools` and a YAML parser. Installing the generator with
+`go get -tool` records those as tool dependencies in the application's `go.mod`, but
+they are never linked into application binaries. Teams that want a completely clean
+`go.mod` can run `go run github.com/hirokazumiyaji/atla-go/atlagen/cmd/atlagen@vX.Y.Z`
+instead.
 
 ```text
 atla-go/
