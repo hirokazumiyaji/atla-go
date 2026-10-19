@@ -185,3 +185,35 @@ func TestFakeDBTx(t *testing.T) {
 	)
 	s.Done(t)
 }
+
+func TestFakeDBFailNext(t *testing.T) {
+	ctx := context.Background()
+	db, s := fakedb.Open(t)
+	boom := errors.New("boom")
+	s.FailNext("RELEASE SAVEPOINT", boom)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT sp1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT sp1"); !errors.Is(err, boom) {
+		t.Fatalf("first RELEASE err = %v, want boom", err)
+	}
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT sp1"); err != nil {
+		t.Fatalf("second RELEASE err = %v; the failure applies once", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	assertLog(t, s,
+		"BEGIN",
+		"EXEC SAVEPOINT sp1",
+		"EXEC RELEASE SAVEPOINT sp1",
+		"EXEC RELEASE SAVEPOINT sp1",
+		"COMMIT",
+	)
+	s.Done(t)
+}

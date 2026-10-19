@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,13 @@ type Script struct {
 	expected []*Response
 	log      []string
 	openRows int
+	failures []failure
+}
+
+// failure is a one-shot error injected by FailNext.
+type failure struct {
+	prefix string
+	err    error
 }
 
 // Response is the canned outcome of one expected statement.
@@ -77,6 +85,16 @@ func (s *Script) expect(query bool, sqlText string, args []any) *Response {
 	defer s.mu.Unlock()
 	s.expected = append(s.expected, r)
 	return r
+}
+
+// FailNext makes the next statement whose SQL starts with prefix fail with
+// err, once. It applies to every Exec and Query, including the savepoint
+// statements that are otherwise accepted without an expectation, and takes
+// precedence over expectations: the failing statement does not consume one.
+func (s *Script) FailNext(prefix string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures = append(s.failures, failure{prefix: prefix, err: err})
 }
 
 // Rows sets the result set returned by an expected query.
@@ -142,6 +160,12 @@ func (s *Script) next(query bool, sqlText string, nv []driver.NamedValue) (*Resp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.log = append(s.log, kind+" "+sqlText)
+	for i, f := range s.failures {
+		if strings.HasPrefix(sqlText, f.prefix) {
+			s.failures = slices.Delete(s.failures, i, i+1)
+			return nil, f.err
+		}
+	}
 	if !query && isSavepoint(sqlText) {
 		return &Response{}, nil
 	}

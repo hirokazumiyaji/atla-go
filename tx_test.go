@@ -135,7 +135,102 @@ func TestRunTxNestedSavepoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		checkLog(t, s, "BEGIN", "EXEC SAVEPOINT atla_sp_1", "EXEC ROLLBACK TO SAVEPOINT atla_sp_1", "COMMIT")
+		checkLog(t, s, "BEGIN",
+			"EXEC SAVEPOINT atla_sp_1",
+			"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"COMMIT")
+	})
+
+	// A cancelled inner context must not skip the savepoint rollback, or the
+	// inner writes would be committed by the outer transaction.
+	t.Run("inner error with cancelled ctx", func(t *testing.T) {
+		db, s := fakedb.Open(t)
+		err := atla.RunTx(ctx, db, func(ex atla.Executor) error {
+			inner, cancel := context.WithCancel(ctx)
+			defer cancel()
+			err := atla.RunTx(inner, ex, func(atla.Executor) error {
+				cancel()
+				return errX
+			})
+			if !errors.Is(err, errX) {
+				t.Errorf("inner RunTx() = %v, want %v", err, errX)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkLog(t, s, "BEGIN",
+			"EXEC SAVEPOINT atla_sp_1",
+			"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"COMMIT")
+	})
+
+	t.Run("inner panic with cancelled ctx", func(t *testing.T) {
+		db, s := fakedb.Open(t)
+		v := mustPanic(t, func() {
+			_ = atla.RunTx(ctx, db, func(ex atla.Executor) error {
+				inner, cancel := context.WithCancel(ctx)
+				defer cancel()
+				return atla.RunTx(inner, ex, func(atla.Executor) error {
+					cancel()
+					panic("boom")
+				})
+			})
+		})
+		if v != "boom" {
+			t.Fatalf("recover() = %v, want boom", v)
+		}
+		checkLog(t, s, "BEGIN",
+			"EXEC SAVEPOINT atla_sp_1",
+			"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"ROLLBACK")
+	})
+
+	// A failed RELEASE (e.g. Postgres in an aborted state) rolls the savepoint
+	// back so the outer transaction stays usable.
+	t.Run("release fails", func(t *testing.T) {
+		db, s := fakedb.Open(t)
+		errRelease := errors.New("release failed")
+		s.FailNext("RELEASE SAVEPOINT", errRelease)
+		err := atla.RunTx(ctx, db, func(ex atla.Executor) error {
+			err := atla.RunTx(ctx, ex, func(atla.Executor) error { return nil })
+			if !errors.Is(err, errRelease) {
+				t.Errorf("inner RunTx() = %v, want %v", err, errRelease)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkLog(t, s, "BEGIN",
+			"EXEC SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"COMMIT")
+	})
+
+	t.Run("release and rollback fail", func(t *testing.T) {
+		db, s := fakedb.Open(t)
+		errRelease := errors.New("release failed")
+		errRollback := errors.New("rollback failed")
+		s.FailNext("RELEASE SAVEPOINT", errRelease)
+		s.FailNext("ROLLBACK TO SAVEPOINT", errRollback)
+		err := atla.RunTx(ctx, db, func(ex atla.Executor) error {
+			return atla.RunTx(ctx, ex, func(atla.Executor) error { return nil })
+		})
+		if !errors.Is(err, errRelease) || !errors.Is(err, errRollback) {
+			t.Fatalf("RunTx() = %v, want both %v and %v", err, errRelease, errRollback)
+		}
+		checkLog(t, s, "BEGIN",
+			"EXEC SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+			"ROLLBACK")
 	})
 
 	t.Run("inner ok", func(t *testing.T) {
@@ -182,7 +277,11 @@ func TestRunTxNestedSavepoint(t *testing.T) {
 		if v != "boom" {
 			t.Fatalf("recover() = %v, want boom", v)
 		}
-		checkLog(t, s, "BEGIN", "EXEC SAVEPOINT atla_sp_1", "EXEC ROLLBACK TO SAVEPOINT atla_sp_1", "ROLLBACK")
+		checkLog(t, s, "BEGIN",
+			"EXEC SAVEPOINT atla_sp_1",
+			"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+			"EXEC RELEASE SAVEPOINT atla_sp_1",
+			"ROLLBACK")
 	})
 
 	t.Run("options", func(t *testing.T) {
@@ -234,7 +333,8 @@ func TestRunTxRawSQLTx(t *testing.T) {
 		"EXEC SAVEPOINT atla_sp_1",
 		"EXEC RELEASE SAVEPOINT atla_sp_1",
 		"EXEC SAVEPOINT atla_sp_1",
-		"EXEC ROLLBACK TO SAVEPOINT atla_sp_1")
+		"EXEC ROLLBACK TO SAVEPOINT atla_sp_1",
+		"EXEC RELEASE SAVEPOINT atla_sp_1")
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit() = %v; atla must not finish the caller's transaction", err)
 	}

@@ -53,7 +53,10 @@ func ReadOnly() TxOption {
 //
 //  1. A [TxRunner]: RunTx delegates to it.
 //  2. A *[TxExecutor] (a nested call): fn runs inside a savepoint and receives a
-//     child TxExecutor. Options are rejected with [ErrTxOptionsNested].
+//     child TxExecutor. Options are rejected with [ErrTxOptionsNested]. The
+//     savepoint is released on success, and rolled back to and then released
+//     on error, on panic, or when the release fails. Ending the savepoint
+//     ignores cancellation of ctx.
 //  3. A *sql.Tx: it is wrapped at depth 0 and handled as in case 2; atla never
 //     commits or rolls back a transaction it did not begin.
 //  4. A [TxBeginner]: RunTx begins a transaction, commits it when fn returns
@@ -95,14 +98,32 @@ func (t *TxExecutor) runNested(ctx context.Context, fn func(Executor) error, opt
 	if _, err := t.tx.ExecContext(ctx, "SAVEPOINT "+name); err != nil {
 		return err
 	}
-	exec := func(query string) func() error {
-		return func() error {
-			_, err := t.tx.ExecContext(ctx, query)
+	// Ending the savepoint must not depend on ctx: if fn cancelled it, a skipped
+	// ROLLBACK TO would let the outer transaction commit fn's writes.
+	endCtx := context.WithoutCancel(ctx)
+	exec := func(query string) error {
+		_, err := t.tx.ExecContext(endCtx, query)
+		return err
+	}
+	// ROLLBACK TO keeps the savepoint open, so it is released afterwards;
+	// otherwise failed sibling calls would accumulate open savepoints.
+	rollback := func() error {
+		if err := exec("ROLLBACK TO SAVEPOINT " + name); err != nil {
 			return err
 		}
+		return exec("RELEASE SAVEPOINT " + name)
+	}
+	// A failed RELEASE (for example on Postgres after fn swallowed an error)
+	// leaves the savepoint open; roll it back so the outer transaction stays
+	// usable.
+	release := func() error {
+		if err := exec("RELEASE SAVEPOINT " + name); err != nil {
+			return errors.Join(err, rollback())
+		}
+		return nil
 	}
 	child := &TxExecutor{tx: t.tx, depth: t.depth + 1}
-	return finish(child, fn, exec("RELEASE SAVEPOINT "+name), exec("ROLLBACK TO SAVEPOINT "+name))
+	return finish(child, fn, release, rollback)
 }
 
 // finish runs fn with ex, then calls commit when fn returns nil and rollback
