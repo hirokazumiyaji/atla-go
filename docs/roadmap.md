@@ -105,7 +105,7 @@ classifier recipe for go-sql-driver, and a MySQL service container in CI.
 
 | Claim | How it is verified |
 | :--- | :--- |
-| Type mismatches do not compile | `internal/e2e/compilefail/`: each case is a tiny `main` package that must **fail** `go build` with an expected error substring (driven by a Go test that runs `go build` per case). Cases: `user.Age.EQ("20")`, `post.AuthorID.EQExpr(user.Name)`, `UserUpdate{Age: atla.Some("x")}`, assigning `Expr[int64]` to `Pred`, `user.ID.EQExpr(post.EditorID)` (nullable vs non-null without `.NotNull()`), and setting a field that does not exist on `UserUpdate`. |
+| Type mismatches do not compile | P1: the runtime compile-fail suite lives at the repo root (`compilefail_test.go` + `testdata/compilefail/`), covering the hand-written runtime API. P3: the generated-code suite in `internal/e2e/compilefail/`, where each case is a tiny `main` package that must **fail** `go build` with an expected error substring (driven by a Go test that runs `go build` per case). Cases: `user.Age.EQ("20")`, `post.AuthorID.EQExpr(user.Name)`, `UserUpdate{Age: atla.Some("x")}`, assigning `Expr[int64]` to `Pred`, `user.ID.EQExpr(post.EditorID)` (nullable vs non-null without `.NotNull()`), and setting a field that does not exist on `UserUpdate`. |
 | Missing required insert fields are caught | `atlavet` `analysistest` cases plus running `go tool atlavet ./...` over the e2e module in CI. |
 | Generated code is stable | `atlagen check` in CI against the committed e2e generated code. |
 | Root module stays dependency-free | CI step: `go list -m all` in the root module prints only the module itself. |

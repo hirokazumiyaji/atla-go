@@ -723,14 +723,18 @@ happens before any SQL is sent; `Exec` and `Save` go through the same check as
 `ToSQL`. On `Update`, `ErrEmptyUpdate` is checked first (§7.2), and `Save` checks
 both guards before `ErrReturningUnsupported`.
 
-> [!WARNING]
-> The guard counts predicates, not their effect. Any predicate passed to `Where`
-> satisfies it, including `atla.And()` with no operands, which renders
-> `WHERE 1 = 1`. A dynamic filter such as `Where(atla.And(filters...))` therefore
-> updates or deletes **every row** when `filters` is empty. Do not rely on
-> `And(filters...)` for safety: check `len(filters) > 0` before building the
-> statement, or pass the filters directly as `Where(filters...)`, which adds no
-> predicate when the slice is empty and so keeps the guard in force.
+The guard checks the effective `WHERE`, not the number of predicates: it sees
+through empty conjunctions. The combined `WHERE` counts as absent when it is
+always true by construction: an `AND` whose operands are all always true
+(including `atla.And()` with no operands, which renders `1 = 1`), or an `OR`
+with an always-true operand. So `Where(atla.And())`, `Where(atla.And(atla.And()))`
+and `Where(atla.Or(atla.And()))` fail with `ErrUnsafeMutation`, and a dynamic
+filter such as `Where(atla.And(filters...))` with an empty `filters` cannot
+silently target every row. Predicates whose effect depends on data are not
+inspected: an empty `NotIn()` (`1 = 1`) and `Raw` fragments count as real
+predicates, and an empty `atla.Or()` (`1 = 0`, matches nothing) is not a
+full-table risk. To intentionally update or delete every row, call
+`.AllowFullTable()`.
 
 ### 7.5 Generated AOT Shortcuts
 

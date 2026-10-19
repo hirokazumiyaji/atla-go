@@ -40,13 +40,15 @@ func (q Select[R]) OrderBy(os ...Order) Select[R] {
 	return q
 }
 
-// Limit sets the maximum number of rows. It is rendered as a literal.
+// Limit sets the maximum number of rows. It is rendered as a literal. A
+// negative n removes the limit.
 func (q Select[R]) Limit(n int) Select[R] {
 	q.limit = n
 	return q
 }
 
-// Offset sets the number of rows to skip. It is rendered as a literal.
+// Offset sets the number of rows to skip. It is rendered as a literal. A
+// negative n removes the offset.
 func (q Select[R]) Offset(n int) Select[R] {
 	q.offset = n
 	return q

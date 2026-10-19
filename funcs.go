@@ -84,6 +84,8 @@ type raw[T any] struct {
 // bind parameter, taking the next value from args, and `??` produces a
 // literal `?` (for example for Postgres jsonb operators). If the number of
 // `?` markers differs from len(args), compilation fails with an error.
+// Every arg is always bound as a parameter: an atla expression passed as an
+// arg is not rendered inline as SQL.
 //
 // The fragment is inserted verbatim. Inside a multi-operand [And] / [Or] and
 // inside arithmetic it is wrapped in parentheses, but as an operand of a

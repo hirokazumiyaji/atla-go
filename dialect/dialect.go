@@ -59,8 +59,8 @@ type Dialect interface {
 	// AppendLock appends a row lock clause with a leading space, or nothing
 	// when the database has no row locks.
 	AppendLock(b []byte, l Lock) []byte
-	// AppendLimitOffset appends LIMIT/OFFSET with a leading space. A value of
-	// -1 means unset; when both are unset nothing is appended.
+	// AppendLimitOffset appends LIMIT/OFFSET with a leading space. A negative
+	// value means unset; when both are unset nothing is appended.
 	AppendLimitOffset(b []byte, limit, offset int) []byte
 	// MaxParams returns the maximum number of bind parameters per statement.
 	MaxParams() int
