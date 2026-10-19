@@ -100,10 +100,15 @@ func kindSentinel(k dialect.ErrorKind) error {
 }
 
 // wrapDBError wraps a classified driver error in a *DBError. A nil error
-// stays nil and an unclassified error is returned unchanged.
+// stays nil, and an unclassified error or one that already contains a
+// *DBError is returned unchanged.
 func wrapDBError(d dialect.Dialect, op, table string, err error) error {
 	if err == nil {
 		return nil
+	}
+	var dbErr *DBError
+	if errors.As(err, &dbErr) {
+		return err
 	}
 	kind := kindSentinel(classify(d, err))
 	if kind == nil {

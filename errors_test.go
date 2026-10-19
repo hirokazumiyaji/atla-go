@@ -2,6 +2,7 @@ package atla
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -69,6 +70,18 @@ func TestUnknownErrorUnwrapped(t *testing.T) {
 	}
 	if err := wrapDBError(dialect.Postgres, "select", "users", nil); err != nil {
 		t.Fatalf("wrapDBError(nil) = %v, want nil", err)
+	}
+}
+
+func TestWrapDBErrorNoDoubleWrap(t *testing.T) {
+	first := wrapDBError(dialect.Postgres, "insert", "users", &fakePgError{"23505"})
+	if err := wrapDBError(dialect.Postgres, "select", "posts", first); err != first { //nolint:errorlint // identity is the point
+		t.Fatalf("re-wrapping a *DBError = %#v, want it unchanged", err)
+	}
+	// A *DBError wrapped by another error is also left alone.
+	outer := fmt.Errorf("scan: %w", first)
+	if err := wrapDBError(dialect.Postgres, "select", "posts", outer); err != outer { //nolint:errorlint // identity is the point
+		t.Fatalf("re-wrapping %v = %#v, want it unchanged", outer, err)
 	}
 }
 
