@@ -26,7 +26,31 @@ type param[T any] struct{ v T }
 func (p param[T]) appendSQL(c *compiler) { c.param(p.v) }
 func (param[T]) exprOf(T)                {}
 
-// binary renders `l op r`.
+// predicate is implemented by predicate-shaped nodes (comparisons, AND/OR,
+// NOT, IS NULL, IN, BETWEEN). As an operand of binary they are wrapped in
+// parentheses, because SQL comparison operators do not nest without them.
+// Atoms such as columns and parameters stay bare.
+type predicate interface {
+	node
+	predicate()
+}
+
+// appendOperand renders n as an operand of a binary operator.
+func appendOperand(c *compiler, n node) {
+	if _, ok := n.(predicate); !ok {
+		n.appendSQL(c)
+		return
+	}
+	if l, ok := n.(logical); ok && len(l.ps) > 1 {
+		l.appendSQL(c) // already parenthesized
+		return
+	}
+	c.buf = append(c.buf, '(')
+	n.appendSQL(c)
+	c.buf = append(c.buf, ')')
+}
+
+// binary renders `l op r`, parenthesizing predicate operands.
 type binary[T any] struct {
 	l  node
 	op string
@@ -34,14 +58,15 @@ type binary[T any] struct {
 }
 
 func (b binary[T]) appendSQL(c *compiler) {
-	b.l.appendSQL(c)
+	appendOperand(c, b.l)
 	c.buf = append(c.buf, ' ')
 	c.buf = append(c.buf, b.op...)
 	c.buf = append(c.buf, ' ')
-	b.r.appendSQL(c)
+	appendOperand(c, b.r)
 }
 
-func (binary[T]) exprOf(T) {}
+func (binary[T]) exprOf(T)   {}
+func (binary[T]) predicate() {}
 
 // unary renders `prefix x suffix`, e.g. `NOT (x)` or `x IS NULL`.
 type unary[T any] struct {
@@ -56,7 +81,8 @@ func (u unary[T]) appendSQL(c *compiler) {
 	c.buf = append(c.buf, u.suffix...)
 }
 
-func (unary[T]) exprOf(T) {}
+func (unary[T]) exprOf(T)   {}
+func (unary[T]) predicate() {}
 
 // logical joins predicates with AND or OR.
 type logical struct {
@@ -107,6 +133,7 @@ func (l logical) appendSQL(c *compiler) {
 }
 
 func (logical) exprOf(bool) {}
+func (logical) predicate()  {}
 
 // inList renders `x IN (…)` or `x NOT IN (…)`, with each value bound as a
 // parameter.
@@ -141,6 +168,7 @@ func (in inList) appendSQL(c *compiler) {
 }
 
 func (inList) exprOf(bool) {}
+func (inList) predicate()  {}
 
 // between renders `x BETWEEN lo AND hi`.
 type between struct {
@@ -156,6 +184,7 @@ func (b between) appendSQL(c *compiler) {
 }
 
 func (between) exprOf(bool) {}
+func (between) predicate()  {}
 
 // nullOf presents x as a nullable expression without changing its SQL.
 type nullOf[T any] struct{ x node }

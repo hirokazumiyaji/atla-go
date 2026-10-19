@@ -77,6 +77,22 @@ func TestComparisonsPostgres(t *testing.T) {
 	})
 }
 
+func TestPredicateOperandsParenthesized(t *testing.T) {
+	age, name := userCols()
+	active := NewColumn[bool](`"users"`, `"active"`)
+	runGolden(t, dialect.Postgres, []golden{
+		{"Comparison", active.EQExpr(age.EQ(1)), `"users"."active" = ("users"."age" = $1)`, []any{int64(1)}},
+		{"SingleAnd", active.EQExpr(And(age.EQ(1))), `"users"."active" = ("users"."age" = $1)`, []any{int64(1)}},
+		{"IsNull", active.EQExpr(name.IsNull()), `"users"."active" = ("users"."name" IS NULL)`, nil},
+		{"In", active.NEExpr(age.In(1, 2)), `"users"."active" <> ("users"."age" IN ($1, $2))`, []any{int64(1), int64(2)}},
+		{"Between", active.EQExpr(age.Between(1, 2)), `"users"."active" = ("users"."age" BETWEEN $1 AND $2)`, []any{int64(1), int64(2)}},
+		{"EmptyOr", active.EQExpr(Or()), `"users"."active" = (1 = 0)`, nil},
+		{"Not", active.EQExpr(Not(age.EQ(1))), `"users"."active" = (NOT ("users"."age" = $1))`, []any{int64(1)}},
+		{"MultiAnd", active.EQExpr(And(age.EQ(1), name.EQ("b"))), `"users"."active" = ("users"."age" = $1 AND "users"."name" = $2)`, []any{int64(1), "b"}},
+		{"Atoms", active.EQExpr(active), `"users"."active" = "users"."active"`, nil},
+	})
+}
+
 func TestComparisonsSQLite(t *testing.T) {
 	age, name := userCols()
 	runGolden(t, dialect.SQLite, []golden{
