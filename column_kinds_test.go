@@ -227,3 +227,31 @@ func TestRawPlaceholderMismatch(t *testing.T) {
 		})
 	}
 }
+
+func TestPredicateShapedOperandsOfInBetweenNull(t *testing.T) {
+	a := NewColumn[int64](`"t"`, `"a"`)
+	b := NewColumn[bool](`"t"`, `"b"`)
+	runGolden(t, dialect.Postgres, []golden{
+		{"IsNullNot", IsNull(Not(a.EQ(1))), `(NOT ("t"."a" = $1)) IS NULL`, []any{int64(1)}},
+		{"IsNotNullCmp", IsNotNull(a.EQ(1)), `("t"."a" = $1) IS NOT NULL`, []any{int64(1)}},
+		{"InCmp", In(a.EQ(1), true), `("t"."a" = $1) IN ($2)`, []any{int64(1), true}},
+		{"NotInCmp", NotIn(a.EQ(1), true), `("t"."a" = $1) NOT IN ($2)`, []any{int64(1), true}},
+		{"InMultiAnd", In(And(b, a.EQ(1)), true), `("t"."b" AND "t"."a" = $1) IN ($2)`, []any{int64(1), true}},
+		{"BetweenCmp", betweenOf(a.EQ(1), false, true), `("t"."a" = $1) BETWEEN $2 AND $3`, []any{int64(1), false, true}},
+		{"BetweenBoundsCmp", between{x: b, lo: a.EQ(1), hi: a.EQ(2)}, `"t"."b" BETWEEN ("t"."a" = $1) AND ("t"."a" = $2)`, []any{int64(1), int64(2)}},
+		{"AtomsBare", IsNull[bool](b), `"t"."b" IS NULL`, nil},
+		{"RawStaysBare", IsNull(Raw[bool]("x = 1")), `x = 1 IS NULL`, nil},
+	})
+}
+
+func TestRawGroupedInLogicalAndArith(t *testing.T) {
+	id := NewNumberColumn[int64](`"users"`, `"id"`)
+	runGolden(t, dialect.Postgres, []golden{
+		{"And", And(Raw[bool]("a = 1 OR b = 2"), id.EQ(3)), `((a = 1 OR b = 2) AND "users"."id" = $1)`, []any{int64(3)}},
+		{"Or", Or(id.EQ(3), Raw[bool]("a AND b")), `("users"."id" = $1 OR (a AND b))`, []any{int64(3)}},
+		{"SingleAndBare", And(Raw[bool]("a = 1 OR b = 2")), `a = 1 OR b = 2`, nil},
+		{"MulLeft", Mul(Raw[int64]("a + b"), 2), `((a + b) * $1)`, []any{int64(2)}},
+		{"MulExprRight", id.MulExpr(Raw[int64]("a + ?", 1)), `("users"."id" * (a + $1))`, []any{1}},
+		{"ComparisonBare", EQ(Raw[int64]("a + b"), 3), `a + b = $1`, []any{int64(3)}},
+	})
+}

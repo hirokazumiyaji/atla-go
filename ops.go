@@ -75,7 +75,7 @@ func Desc[T any](e Expr[T]) Order { return Order{expr: e, desc: true} }
 
 // arith renders `(l op r)`. It parenthesizes itself so that nesting is
 // unambiguous, and it is not predicate-shaped, so comparisons render it as
-// is.
+// is. Raw operands are parenthesized (see appendGrouped).
 type arith[T any] struct {
 	l  node
 	op string
@@ -84,11 +84,11 @@ type arith[T any] struct {
 
 func (a arith[T]) appendSQL(c *compiler) {
 	c.buf = append(c.buf, '(')
-	a.l.appendSQL(c)
+	appendGrouped(c, a.l)
 	c.buf = append(c.buf, ' ')
 	c.buf = append(c.buf, a.op...)
 	c.buf = append(c.buf, ' ')
-	a.r.appendSQL(c)
+	appendGrouped(c, a.r)
 	c.buf = append(c.buf, ')')
 }
 

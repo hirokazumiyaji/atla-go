@@ -50,6 +50,25 @@ func appendOperand(c *compiler, n node) {
 	c.buf = append(c.buf, ')')
 }
 
+// rawFragment is implemented by Raw nodes. Their SQL is inserted verbatim,
+// so inside a multi-operand AND/OR and inside arithmetic they are wrapped in
+// parentheses to keep a fragment such as `a OR b` or `a + b` grouped.
+type rawFragment interface {
+	node
+	rawFragment()
+}
+
+// appendGrouped renders n, parenthesizing it when it is a Raw fragment.
+func appendGrouped(c *compiler, n node) {
+	if _, ok := n.(rawFragment); !ok {
+		n.appendSQL(c)
+		return
+	}
+	c.buf = append(c.buf, '(')
+	n.appendSQL(c)
+	c.buf = append(c.buf, ')')
+}
+
 // binary renders `l op r`, parenthesizing predicate operands.
 type binary[T any] struct {
 	l  node
@@ -68,7 +87,9 @@ func (b binary[T]) appendSQL(c *compiler) {
 func (binary[T]) exprOf(T)   {}
 func (binary[T]) predicate() {}
 
-// unary renders `prefix x suffix`, e.g. `NOT (x)` or `x IS NULL`.
+// unary renders `prefix x suffix`, e.g. `NOT (x)` or `x IS NULL`. Without a
+// prefix, x is rendered as an operand (see appendOperand); with one, the
+// prefix is expected to open its own parenthesis.
 type unary[T any] struct {
 	prefix string
 	x      node
@@ -76,8 +97,12 @@ type unary[T any] struct {
 }
 
 func (u unary[T]) appendSQL(c *compiler) {
-	c.buf = append(c.buf, u.prefix...)
-	u.x.appendSQL(c)
+	if u.prefix == "" {
+		appendOperand(c, u.x)
+	} else {
+		c.buf = append(c.buf, u.prefix...)
+		u.x.appendSQL(c)
+	}
 	c.buf = append(c.buf, u.suffix...)
 }
 
@@ -127,7 +152,7 @@ func (l logical) appendSQL(c *compiler) {
 		if i > 0 {
 			c.buf = append(c.buf, l.op...)
 		}
-		p.appendSQL(c)
+		appendGrouped(c, p)
 	}
 	c.buf = append(c.buf, ')')
 }
@@ -136,7 +161,7 @@ func (logical) exprOf(bool) {}
 func (logical) predicate()  {}
 
 // inList renders `x IN (…)` or `x NOT IN (…)`, with each value bound as a
-// parameter.
+// parameter. A predicate-shaped x is parenthesized (see appendOperand).
 type inList struct {
 	x    node
 	vals []any
@@ -152,7 +177,7 @@ func (in inList) appendSQL(c *compiler) {
 		}
 		return
 	}
-	in.x.appendSQL(c)
+	appendOperand(c, in.x)
 	if in.not {
 		c.buf = append(c.buf, " NOT IN ("...)
 	} else {
@@ -170,17 +195,18 @@ func (in inList) appendSQL(c *compiler) {
 func (inList) exprOf(bool) {}
 func (inList) predicate()  {}
 
-// between renders `x BETWEEN lo AND hi`.
+// between renders `x BETWEEN lo AND hi`, parenthesizing predicate-shaped
+// operands (see appendOperand).
 type between struct {
 	x, lo, hi node
 }
 
 func (b between) appendSQL(c *compiler) {
-	b.x.appendSQL(c)
+	appendOperand(c, b.x)
 	c.buf = append(c.buf, " BETWEEN "...)
-	b.lo.appendSQL(c)
+	appendOperand(c, b.lo)
 	c.buf = append(c.buf, " AND "...)
-	b.hi.appendSQL(c)
+	appendOperand(c, b.hi)
 }
 
 func (between) exprOf(bool) {}

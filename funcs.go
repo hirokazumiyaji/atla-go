@@ -84,6 +84,12 @@ type raw[T any] struct {
 // bind parameter, taking the next value from args, and `??` produces a
 // literal `?` (for example for Postgres jsonb operators). If the number of
 // `?` markers differs from len(args), compilation fails with an error.
+//
+// The fragment is inserted verbatim. Inside a multi-operand [And] / [Or] and
+// inside arithmetic it is wrapped in parentheses, but as an operand of a
+// comparison, IN, BETWEEN or IS NULL it is not: a fragment containing an
+// operator of lower precedence than the one it is combined with (for
+// example `a OR b` or `a + b = c`) must be parenthesized by the caller.
 func Raw[T any](sql string, args ...any) Expr[T] {
 	return raw[T]{sql: sql, args: slices.Clone(args)}
 }
@@ -112,4 +118,5 @@ func (r raw[T]) appendSQL(c *compiler) {
 	}
 }
 
-func (raw[T]) exprOf(T) {}
+func (raw[T]) exprOf(T)     {}
+func (raw[T]) rawFragment() {}
