@@ -121,10 +121,7 @@ func (n selectNode[R]) appendSQL(c *compiler) {
 	c.buf = append(c.buf, list...)
 	c.buf = append(c.buf, " FROM "...)
 	c.buf = q.t.appendFrom(c.buf)
-	if len(q.where) > 0 {
-		c.buf = append(c.buf, " WHERE "...)
-		And(q.where...).appendSQL(c)
-	}
+	appendWhere(c, q.where)
 	for i, o := range q.order {
 		if i == 0 {
 			c.buf = append(c.buf, " ORDER BY "...)
@@ -136,6 +133,15 @@ func (n selectNode[R]) appendSQL(c *compiler) {
 	c.buf = c.d.AppendLimitOffset(c.buf, q.limit, q.offset)
 	if q.lock != nil {
 		c.buf = c.d.AppendLock(c.buf, *q.lock)
+	}
+}
+
+// appendWhere appends ` WHERE <preds combined with AND>`, or nothing when
+// there are no predicates.
+func appendWhere(c *compiler, where []Pred) {
+	if len(where) > 0 {
+		c.buf = append(c.buf, " WHERE "...)
+		And(where...).appendSQL(c)
 	}
 }
 
