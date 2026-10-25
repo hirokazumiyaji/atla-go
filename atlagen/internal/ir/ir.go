@@ -81,12 +81,20 @@ const (
 )
 
 // ForeignKey is a foreign-key constraint declared on a table.
+//
+// RefSchema and RefExternal locate the referenced table:
+//   - RefSchema "" and RefExternal false: the table is in the selected schema.
+//   - RefSchema "<s>": the table is in schema <s> of the inspected document.
+//   - RefExternal true (RefSchema ""): the table is not present in the
+//     inspected document, e.g. an FK into a schema that was not inspected.
+//     P4 skips the edge with a warning.
 type ForeignKey struct {
-	Symbol     string   `json:"symbol"`
-	Columns    []string `json:"columns"`
-	RefSchema  string   `json:"ref_schema"` // "" when the referenced table is in this schema
-	RefTable   string   `json:"ref_table"`
-	RefColumns []string `json:"ref_columns"`
+	Symbol      string   `json:"symbol"`
+	Columns     []string `json:"columns"`
+	RefSchema   string   `json:"ref_schema"`
+	RefTable    string   `json:"ref_table"`
+	RefColumns  []string `json:"ref_columns"`
+	RefExternal bool     `json:"ref_external"`
 }
 
 // RequiredForInsert reports whether an INSERT must set the column: it is

@@ -45,6 +45,21 @@ CREATE TABLE codes(
 );
 ```
 
+## Foreign keys into schemas that were not inspected
+
+A single-schema inspect (for example `postgres://…?search_path=public`)
+prints an FK into another schema, such as Supabase's `public.profiles` →
+`auth.users`, as an unqualified `ref_columns = [table.users.column.id]`. No
+`users` table appears in the document. Atlas stubs the target table
+(`sql/internal/sqlx/sqlx.go`) and only qualifies references to tables it
+prints (`specutil.QualifyReferences`).
+
+The parser marks such an FK `RefExternal: true` (with `RefSchema: ""`). This
+is pinned by `TestParseRefExternal`, using inline HCL. If the selected schema
+also has a table with that name, the reference cannot be told apart from a
+same-schema one and resolves to the selected schema. Inspect every schema
+involved (a realm-wide URL) to avoid this.
+
 ## Postgres and MySQL: Atlas's own marshaller, hand-built input
 
 No Postgres or MySQL server was available. For these files, a `schema.Realm`

@@ -578,12 +578,14 @@ func (p *parser) parseForeignKey(b *hclsyntax.Block, index int, table string) (i
 	if symbol == "" {
 		symbol = "fk_" + strings.Join(cols, "_") + "_" + refTable
 	}
+	refSchema, external := p.refSchema(refQualifier, refTable)
 	return ir.ForeignKey{
-		Symbol:     symbol,
-		Columns:    cols,
-		RefSchema:  p.refSchema(refQualifier, refTable),
-		RefTable:   refTable,
-		RefColumns: refCols,
+		Symbol:      symbol,
+		Columns:     cols,
+		RefSchema:   refSchema,
+		RefTable:    refTable,
+		RefColumns:  refCols,
+		RefExternal: external,
 	}, nil
 }
 
@@ -609,12 +611,24 @@ func refColumn(expr hclsyntax.Expression, self string) (qualifier, table, column
 // refSchema returns the schema of a referenced table, or "" when it is the
 // selected schema. An unqualified name means the selected schema if it holds
 // the table, else the only other schema that does.
-func (p *parser) refSchema(qualifier, table string) string {
+//
+// external reports an unqualified reference to a table that no schema of the
+// document holds. A single-schema inspect prints an FK into a schema that was
+// not inspected this way: Atlas stubs the target table
+// (sql/internal/sqlx/sqlx.go) and prints table.<t>.column.<c> without a
+// qualifier, because QualifyReferences (sql/internal/specutil/spec.go) only
+// qualifies references to tables in the output.
+//
+// Limitation: if the selected schema also has a table named <t>, such a
+// reference cannot be told apart from a same-schema reference and resolves
+// to the selected schema. Inspecting every schema involved (a realm-wide
+// URL) avoids this.
+func (p *parser) refSchema(qualifier, table string) (schema string, external bool) {
 	if qualifier != "" {
 		if qualifier == p.selected {
-			return ""
+			return "", false
 		}
-		return qualifier
+		return qualifier, false
 	}
 	var others []string
 	for _, t := range p.tables {
@@ -622,14 +636,19 @@ func (p *parser) refSchema(qualifier, table string) string {
 			continue
 		}
 		if t.schema == p.selected {
-			return ""
+			return "", false
 		}
 		others = append(others, t.schema)
 	}
-	if len(others) == 1 {
-		return others[0]
+	switch len(others) {
+	case 0:
+		return "", true
+	case 1:
+		return others[0], false
 	}
-	return ""
+	// Several other schemas hold <t>: Atlas would have qualified the
+	// reference, so this does not occur in inspect output.
+	return "", false
 }
 
 // columnList reads [column.a, column.b].

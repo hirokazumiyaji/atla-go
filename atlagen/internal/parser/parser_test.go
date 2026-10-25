@@ -623,6 +623,73 @@ schema "public" {
 	}})
 }
 
+func TestParseRefExternal(t *testing.T) {
+	// A single-schema inspect (search_path=public) of public.profiles with an
+	// FK to auth.users: Atlas stubs the target and prints it unqualified, and
+	// no users table appears anywhere in the document.
+	s := mustParse(t, `
+table "profiles" {
+  schema = schema.public
+  column "id" {
+    null = false
+    type = uuid
+  }
+  column "user_id" {
+    null = false
+    type = uuid
+  }
+  column "org_id" {
+    null = false
+    type = uuid
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "profiles_user_id_fkey" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_update   = NO_ACTION
+    on_delete   = CASCADE
+  }
+  foreign_key "profiles_org_id_fkey" {
+    columns     = [column.org_id]
+    ref_columns = [table.orgs.column.id]
+  }
+  foreign_key "profiles_self_fkey" {
+    columns     = [column.org_id]
+    ref_columns = [column.id]
+  }
+}
+table "orgs" {
+  schema = schema.public
+  column "id" {
+    null = false
+    type = uuid
+  }
+}
+schema "public" {
+}
+`, "postgres")
+	equal(t, "profiles.ForeignKeys", mustTable(t, s, "profiles").ForeignKeys, []ir.ForeignKey{
+		{Symbol: "profiles_user_id_fkey", Columns: []string{"user_id"}, RefSchema: "", RefTable: "users", RefColumns: []string{"id"}, RefExternal: true},
+		{Symbol: "profiles_org_id_fkey", Columns: []string{"org_id"}, RefSchema: "", RefTable: "orgs", RefColumns: []string{"id"}},
+		{Symbol: "profiles_self_fkey", Columns: []string{"org_id"}, RefSchema: "", RefTable: "profiles", RefColumns: []string{"id"}},
+	})
+
+	// A table of another schema block is not external (multi_schema.hcl).
+	public := parseFixture(t, "multi_schema.hcl", "postgres", "public")
+	fk := mustTable(t, public, "events").ForeignKeys[0]
+	equal(t, "events fk RefSchema", fk.RefSchema, "audit")
+	equal(t, "events fk RefExternal", fk.RefExternal, false)
+
+	// Same-schema references in the fixtures are not external.
+	for _, tbl := range parseFixture(t, "composite.hcl", "postgres", "").Tables {
+		for _, fk := range tbl.ForeignKeys {
+			equal(t, tbl.DBName+"."+fk.Symbol+".RefExternal", fk.RefExternal, false)
+		}
+	}
+}
+
 func TestParseEnumExactMatch(t *testing.T) {
 	s := mustParse(t, `
 table "t" {
