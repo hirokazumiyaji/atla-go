@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -462,5 +463,26 @@ func TestModuleImportPath(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "go.mod"), "go 1.24\n")
 		_, err := ModuleImportPath(dir)
 		wantErr(t, err, "module")
+	})
+	t.Run("unreadable go.mod is an error", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("file permissions are not enforced on windows")
+		}
+		if os.Geteuid() == 0 {
+			t.Skip("root can read a 0o000 file")
+		}
+		outer := moduleDir(t)
+		inner := filepath.Join(outer, "sub")
+		gomod := filepath.Join(inner, "go.mod")
+		writeFile(t, gomod, "module example.com/sub\n")
+		if err := os.Chmod(gomod, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(gomod, 0o644) })
+		got, err := ModuleImportPath(filepath.Join(inner, "gen"))
+		if err == nil {
+			t.Fatalf("ModuleImportPath = %q, want an error for the unreadable go.mod", got)
+		}
+		wantErr(t, err, "reading "+gomod)
 	})
 }

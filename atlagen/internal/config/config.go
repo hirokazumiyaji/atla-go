@@ -323,7 +323,7 @@ func ModuleImportPath(outDir string) (string, error) {
 				return mod, nil
 			}
 			return mod + "/" + filepath.ToSlash(rel), nil
-		case !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission):
+		case !errors.Is(err, os.ErrNotExist):
 			return "", fmt.Errorf("reading %s: %w", gomod, err)
 		}
 		if filepath.Dir(dir) == dir {
