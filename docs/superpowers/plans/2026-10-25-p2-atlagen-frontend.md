@@ -17,9 +17,18 @@ It is exposed through `atlagen ir` (dumps the IR as JSON) and `atlagen version`.
 
 **Spec:** `docs/generator-spec.md` §1–§4 and §8; `docs/roadmap.md` P2; `docs/architecture.md` §3. Reference implementation (Python): `/home/user/atla/packages/atlagen/src/atlagen/{parser,naming,mapper,inspect,config}.py`.
 
+## Amendment A — input format is Atlas HCL (decided 2026-10-25, after Task 1)
+
+Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then showed that this JSON is a lossy summary: it never contains defaults, identity/auto_increment, Postgres enums or partial-index `where`, and its real shape differs from the atla fixtures (see `.superpowers/sdd/2026-10-25-p2-atlagen-frontend/atlas-json-research.md`). The user chose to read **Atlas's default HCL output** (`atlas schema inspect -u <url>`, no `--format`) instead. Consequences:
+
+- **New Task 8** replaces the JSON parser with an HCL parser, keeping the `parser.Parse` signature and the `ir` types. JSON input is rejected with a pointer to the HCL command.
+- **Execution order:** Task 1 (done), Task 2, **Task 8**, then Tasks 3–7.
+- Tasks 3, 4, 6 and 7 below already reflect HCL: fixture names `.hcl`, and the `atlas` command without `--format`.
+- **New allowed dependency:** `github.com/hashicorp/hcl/v2 v2.24.0`. Its transitive deps (`github.com/zclconf/go-cty` etc.) come with it. v2.25.0 requires Go 1.25, so do not upgrade.
+
 ## Global Constraints
 
-- **Module:** `github.com/hirokazumiyaji/atla-go/atlagen` keeps the `go 1.24.0` directive. The only allowed requires are `go.yaml.in/yaml/v3 v3.0.4` and `golang.org/x/mod v0.27.0`. Add them with `GOTOOLCHAIN=local go get …@<version>` so the go directive is not bumped, and commit `go.sum`.
+- **Module:** `github.com/hirokazumiyaji/atla-go/atlagen` keeps the `go 1.24.0` directive. The only allowed direct requires are `go.yaml.in/yaml/v3 v3.0.4`, `golang.org/x/mod v0.27.0` and `github.com/hashicorp/hcl/v2 v2.24.0` (plus their transitive deps). Add them with `GOTOOLCHAIN=local go get …@<version>` so the go directive is not bumped, and commit `go.sum`.
 - **Root module:** `github.com/hirokazumiyaji/atla-go` is not touched, and its `go.mod` must still have no `require` lines.
 - **Packages:** every package lives under `atlagen/internal/` (`ir`, `parser`, `naming`, `mapper`, `inspect`, `config`, `pipeline`). The only binary is `atlagen/cmd/atlagen`.
 - **Tests:** no network access and no real `atlas` binary. `inspect` tests use a fake `atlas` shell script placed first on `PATH`.
@@ -69,7 +78,7 @@ It is exposed through `atlagen ir` (dumps the IR as JSON) and `atlagen version`.
 2. **Identifiers starting with digits or containing hyphens or spaces** must still become valid Go identifiers. Examples: `2fa_codes`, `order-items`, enum value `in-progress`. Owned by Task 2 (`TestPascalSanitizes`).
 3. **Relative paths in `atlagen.yaml`** must resolve against the config file's directory when atlagen runs via `go:generate` from a package directory. Owned by Task 5 (`TestResolveRelativeToConfigDir`).
 4. **A missing or failing `atlas` binary** must produce an actionable message that includes atlas's stderr. Owned by Task 4 (`TestLoadAtlasMissing`, `TestLoadAtlasFails`).
-5. **Atlas JSON shape variants** must parse to the same IR: PK columns given as strings or objects, index `parts` or `columns`, `auto_increment` as a bool, string or attr, `identity`. Owned by Task 1 (`TestParseShapeVariants`).
+5. **Atlas HCL variants** must parse to the same IR: `default` given as a literal or `sql("…")`, `auto_increment = true`, an `identity {}` block, index `columns = [...]` or `on {}` blocks, and a type given as an identifier, a call (`varchar(255)`) or `sql("…")`. Owned by Task 8 (`TestParseHCLVariants`).
 
 ---
 
@@ -233,6 +242,65 @@ atlagen/
 - [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
 - [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add naming rules and collision checks"`
 
+### Task 8: Replace the JSON parser with an Atlas HCL parser (runs after Task 2)
+
+**Files:**
+- Modify: `atlagen/go.mod`, `atlagen/go.sum`: `GOTOOLCHAIN=local go get github.com/hashicorp/hcl/v2@v2.24.0`. The go directive stays `go 1.24.0`.
+- Rewrite: `atlagen/internal/parser/parser.go`, `atlagen/internal/parser/parser_test.go`. The JSON-decoding code is removed.
+- Replace fixtures in `atlagen/internal/testdata/atlas/`: delete every `*.json` and add `.hcl` equivalents with the same base names (`postgres_users`, `sqlite_users`, `mysql_users`, `typecheck_users`, `composite`, `sqlite_types`, `pg_types`, `multi_schema`), plus `testdata/atlas/README.md` recording where each file came from.
+  - **SQLite fixtures** are real atlas output. Create the DB with `python3 -c 'import sqlite3…'` and run `/tmp/claude-0/-home-user/7f79205c-c024-59bd-8c4f-22ee24c02d98/scratchpad/atlasbin schema inspect -u "sqlite://<file>"`. This is a community atlas build made from source.
+  - **Postgres/MySQL fixtures** are hand-written. Follow the HCL that atlas prints, as defined in the atlas source at `/tmp/claude-0/-home-user/7f79205c-c024-59bd-8c4f-22ee24c02d98/scratchpad/atlas-src` (`sql/postgres/sqlspec.go`, `sql/mysql/sqlspec.go`, `sql/sqlspec/sqlspec.go`, `sql/internal/specutil`).
+  - The fixtures cover the same facts the JSON fixtures covered: enum, defaults, identity, serial, composite PK/FK, an expression index, a partial index, cross-schema FK, the rowid alias and every type in pg_types.
+- Modify: tests in `atlagen/internal/naming/` that load JSON fixtures, so they load the `.hcl` fixtures (same assertions).
+
+**Interfaces:**
+- Consumes/Produces: unchanged — `parser.Parse(data []byte, dialect, schemaName string) (*ir.Schema, error)` and the `ir` types from Task 1. `Parse` still fills only DB facts.
+
+**Rules (the HCL that `atlas schema inspect` prints):**
+- **Parsing:** use `hclsyntax.ParseConfig` and walk the `*hclsyntax.Body` AST. There is no evaluation context: references such as `schema.public`, `column.id` and `table.users.column.id` are read as `hcl.Traversal`s, and only literal expressions are evaluated (with a nil context).
+  - Top-level blocks: `schema "<name>" {}`, `table "<name>" { schema = schema.<s> … }`, `enum "<name>" { schema = schema.<s>  values = [...] }`.
+  - Any other top-level block (`view`, `function`, `sequence`, …) is ignored.
+- **Schema selection:** `schemaName == ""` picks the first `schema` block in file order. Only tables and enums whose `schema` attribute references the selected schema are included. Error messages stay as Task 1 defined them (`schema "x" not found; available: …`, `has no tables`).
+- **Column:**
+  - `null = true` → Nullable (absent → false); PK columns are never Nullable.
+  - `type`: an identifier (`integer`, `bigserial`, `timestamptz`, `double_precision`) or a call (`varchar(255)`, `numeric(10,2)`) becomes RawType. The identifier's `_` is replaced by a space (`double_precision` → `double precision`, `character_varying(255)` → `character varying(255)`), and args are rendered back, comma-joined, without spaces.
+  - `sql("<t>")` → RawType `<t>`.
+  - `enum.<name>` → `Column.Enum = <name>` and RawType `<name>`.
+  - Verify these renderings against atlas-src's type specs and record any exception in the parser's comments.
+- **HasDefault:** true when any of these holds: a `default` attribute is present (any expression); `auto_increment = true`; an `identity` block is present; the type is in the serial family; the SQLite rowid rule (single-column PK with RawType lowercased equal to `integer`).
+- **Keys and indexes:**
+  - `primary_key { columns = [column.a, column.b] }` → PrimaryKey in that order.
+  - `index "<n>"` contributes to Uniques only when `unique = true`, it has no `where`, and every part is a column (`columns = [...]`, or `on { column = column.x }` blocks, with no `on { expr = … }`).
+- **Foreign keys:** `foreign_key "<n>" { columns = [...]; ref_columns = [table.<t>.column.<c>, …] }`.
+  - Symbol = the block label.
+  - RefTable and RefSchema come from the ref traversal. Check in atlas-src how a cross-schema reference is printed, for example `table.<schema>.<table>.column.<c>` or a `schema`-qualified form.
+  - RefSchema is `""` when the referenced schema is the selected one; this resolves Task 1's deferred minor item about RefSchema.
+- **Enums:** `values` must be a list of string literals. A column's enum must match the enum name exactly; there is no case-folding (this resolves Task 1's deferred minor item).
+- **Errors:**
+  - HCL syntax diagnostics → an error with `file:line:col`. The filename passed to the parser is `schema.hcl`.
+  - Input whose first non-space byte is `{` → `input looks like JSON; atlagen reads Atlas HCL — run "atlas schema inspect" without --format`.
+  - All structural errors from Task 1 are kept (unknown column in PK/FK/index, duplicate table/column, missing type, …) in the same lowercase `table "t": column "c": …` form.
+
+- [ ] **Step 1: Write the failing tests.** Port every Task 1 test to the `.hcl` fixtures, keeping the same expected IR. Then add these:
+  ```go
+  func TestParseHCLVariants(t *testing.T) {
+      // inline HCL: default = 0, default = "bob", default = sql("CURRENT_TIMESTAMP") → HasDefault
+      // auto_increment = true → HasDefault; identity { generated = BY_DEFAULT } → HasDefault
+      // type = varchar(255) → RawType "varchar(255)"; type = sql("geometry(Point,4326)") → RawType "geometry(Point,4326)"
+      // type = double_precision → "double precision"; type = enum.user_role → Enum "user_role", RawType "user_role"
+      // index with on { column = column.a } on { column = column.b } unique = true → Uniques [["a","b"]]
+      // index with on { expr = "lower(a)" } unique = true → excluded; unique = true + where = "a > 0" → excluded
+  }
+  func TestParseRejectsJSON(t *testing.T) { /* `{"schemas":[]}` → error containing "input looks like JSON" and "atlas schema inspect" */ }
+  func TestParseSyntaxError(t *testing.T) { /* `table "t" {` (unclosed) → error containing "schema.hcl:" */ }
+  func TestParseRefSchemaNormalized(t *testing.T) { /* same-schema FK written with explicit schema qualifier → RefSchema ""; cross-schema (multi_schema.hcl) → "audit" */ }
+  func TestParseEnumExactMatch(t *testing.T) { /* enums "Mood" and "mood"; column type enum.mood → Enum "mood" */ }
+  ```
+- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/parser/`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Write the parser as described in Rules, and update the naming tests' fixture paths.
+- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && grep '^go 1.24.0$' go.mod`. Expected: PASS, and the go directive is unchanged.
+- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): parse Atlas HCL instead of lossy inspect JSON"`
+
 ### Task 3: Type mapper and scan plans
 
 **Files:**
@@ -259,7 +327,7 @@ atlagen/
       // "int unsigned"→"int" (unsigned recorded separately; not used by PG/SQLite), "text[]"→"text[]"
   }
   func TestPostgresTable(t *testing.T) {
-      // one subtest per generator-spec §4.1 row, using pg_types.json (non-null columns):
+      // one subtest per generator-spec §4.1 row, using pg_types.hcl (non-null columns):
       // smallint→int16 NumberColumn widen; integer→int32 NumberColumn widen; bigint→int64 NumberColumn direct;
       // real→float32 widen; double precision→float64 direct; numeric→string Column; money→string Column;
       // boolean→bool Column; text/varchar/char/citext/inet/cidr/macaddr→string StringColumn; bytea→[]byte Column;
@@ -273,7 +341,7 @@ atlagen/
   }
   func TestPostgresUnmapped(t *testing.T) { /* raw type "xml" → error naming table, column, type and "types:" */ }
   func TestSQLiteTable(t *testing.T) {
-      // sqlite_types.json: INTEGER→int64 direct; DATETIME→time.Time; BOOLEAN→bool; VARCHAR(10)→string StringColumn;
+      // sqlite_types.hcl: INTEGER→int64 direct; DATETIME→time.Time; BOOLEAN→bool; VARCHAR(10)→string StringColumn;
       // MEDIUMINT→int64 (affinity); NUMERIC(10,2)→string; FOO→string + exactly one warning naming table, column and "FOO"
   }
   func TestNullability(t *testing.T) {
@@ -313,7 +381,7 @@ atlagen/
   ```
   Dispatch:
   - `Schema` is `""` or `"-"` → read `Stdin`.
-  - `IsURL` → run `atlas schema inspect -u <Schema> [--dev-url <DevURL>] --format '{{ json . }}'` with `cmd.Dir = Dir`. The format argument is passed literally as `{{ json . }}`, with no shell.
+  - `IsURL` → run `atlas schema inspect -u <Schema> [--dev-url <DevURL>]` with `cmd.Dir = Dir`. No `--format` flag: atlas's default output is the HCL that the parser reads.
   - Otherwise → read the file. A relative path is joined to `Dir` when `Dir` is non-empty.
   - Empty input from any source → error `empty schema input`.
 
@@ -322,7 +390,7 @@ atlagen/
   func TestLoadStdin(t *testing.T) { /* Schema "-" and "" read Stdin bytes verbatim */ }
   func TestLoadFile(t *testing.T) { /* absolute path; relative path + Dir; missing file → error containing the path */ }
   func TestLoadAtlas(t *testing.T) {
-      // Schema "file://schema.hcl", DevURL "docker://postgres/16/dev", Dir d → args.txt == `schema inspect -u file://schema.hcl --dev-url docker://postgres/16/dev --format {{ json . }}`
+      // Schema "file://schema.hcl", DevURL "docker://postgres/16/dev", Dir d → args.txt == `schema inspect -u file://schema.hcl --dev-url docker://postgres/16/dev`
       // pwd.txt == d; returned bytes == fixture
       // without DevURL → no --dev-url flag
   }
@@ -432,17 +500,17 @@ atlagen/
 - [ ] **Step 1: Write the failing tests.**
   ```go
   func TestPipelineRun(t *testing.T) {
-      // composite.json via r.Schema (file), dialect postgres, temp module → no error;
+      // composite.hcl via r.Schema (file), dialect postgres, temp module → no error;
       // memberships Model "Membership", columns GoName "OrgID"/"UserID", Kind NumberColumn, Scan direct (bigint)
   }
-  func TestPipelineErrorsCarryStage(t *testing.T) { /* unmapped type → error from mapper containing the table/column context; bad JSON → parse error */ }
+  func TestPipelineErrorsCarryStage(t *testing.T) { /* unmapped type → error from mapper containing the table/column context; bad HCL → parse error */ }
   func TestCLIVersion(t *testing.T) { /* run(["version"]) → exit 0, stdout "atlagen devel\n" (test binary has no module version) */ }
   func TestCLIIRGolden(t *testing.T) {
       // temp module (go.mod "module example.com/app"); run(["ir","-s",<abs fixture>,"--dialect","postgres","-o","internal/dbgen"], cwd=temp)
       // → exit 0; stdout == golden file bytes; -update flag rewrites goldens (postgres_users, composite)
   }
   func TestCLIIRStdin(t *testing.T) { /* fixture piped via stdin with --schema "-" → same output as the file variant */ }
-  func TestCLIWarnings(t *testing.T) { /* sqlite_types.json → stderr contains "atlagen: warning: " and "FOO"; exit 0 */ }
+  func TestCLIWarnings(t *testing.T) { /* sqlite_types.hcl → stderr contains "atlagen: warning: " and "FOO"; exit 0 */ }
   func TestCLIUsageErrors(t *testing.T) { /* no args, "bogus", "ir --nope" → exit 2 with usage on stderr; missing --dialect → exit 1 "atlagen: dialect is required" */ }
   func TestCLIDeterministic(t *testing.T) { /* two runs → identical stdout bytes */ }
   ```
@@ -460,6 +528,7 @@ atlagen/
   - §3: sanitizing, reserved names and collision rules, per Plan Decisions 5–8.
   - §4: overrides, scan plans and SQLite affinity, per Plan Decisions 9–12.
   - §1.4 and §8: relative paths and dev-url, per Plan Decisions 14–15.
+- Modify: `docs/generator-spec.md` §1.2 and §2, `docs/architecture.md` §1.1/§4.1, `docs/roadmap.md` P2 item 2 and `README.md`: the input is Atlas's default HCL output (`atlas schema inspect -u …`, no `--format`), parsed with `hashicorp/hcl/v2`; JSON input is rejected.
 - Modify: `docs/roadmap.md`: P2 item 5 lists `ir`/`version`; P3 gains `generate`/`check`.
 - Modify: `docs/architecture.md` §3: the generator packages live under `atlagen/internal/`.
 
