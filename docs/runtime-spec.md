@@ -30,7 +30,7 @@ Identifiers prefixed with `dbgen.` / `user.` / `post.` refer to **generated** co
 
 ---
 
-## 2. Expressions (`expr.go`, `column.go`, `funcs.go`)
+## 2. Expressions (`expr.go`, `column.go`, `nullcolumn.go`, `ops.go`, `funcs.go`, `subquery.go`)
 
 ### 2.1 `Expr[T]`
 
@@ -127,7 +127,7 @@ func (c NumberColumn[T]) AddExpr(e Expr[T]) Expr[T] // … Sub/Mul/Div Expr vari
 type StringColumn[T ~string] struct{ Column[T] }  // T is string or a generated enum type
 func (c StringColumn[T]) Like(pattern string) Pred
 func (c StringColumn[T]) ILike(pattern string) Pred      // dialect-expanded, see §3
-func (c StringColumn[T]) Contains(s string) Pred         // LIKE '%' || escaped(s) || '%'
+func (c StringColumn[T]) Contains(s string) Pred         // LIKE $1 ESCAPE '\', $1 = "%" + escaped(s) + "%"
 func (c StringColumn[T]) HasPrefix(s string) Pred
 func (c StringColumn[T]) HasSuffix(s string) Pred
 ```
@@ -177,16 +177,36 @@ write structs it shows as `atla.Opt[*time.Time]` (see §4).
 | :--- | :--- | :--- |
 | `param[T]` | `Expr[T]` | bind parameter (`$1` / `?` / `%s` placeholder style is chosen by the dialect) |
 | `Column[T]` | `Expr[T]` | `"users"."age"` |
-| `binary[T]` | `Expr[T]` | `l op r` (`=`, `<>`, `<`, `+`, …) |
-| `unary[T]` | `Expr[T]` | `NOT (x)`, `x IS NULL`, `x IS NOT NULL` |
-| `logical` | `Pred` | `(a AND b AND c)`. Nested nodes with the same operator are flattened, and a single operand is emitted without parentheses. |
-| `inList[T]` | `Pred` | `x IN ($1, $2)`. An empty list compiles to `1 = 0` (`NOT IN` → `1 = 1`). |
-| `between[T]` | `Pred` | `x BETWEEN $1 AND $2` |
-| `like` | `Pred` | `x LIKE $1 ESCAPE '\'` or the dialect's case-insensitive form |
-| `funcCall[T]` | `Expr[T]` | `COUNT(*)`, `MAX(x)`, `COALESCE(a, b)` |
-| `raw[T]` | `Expr[T]` | user SQL with `?` markers rewritten to dialect placeholders |
-| `subquery[T]` | `Subquery[T]` | `(SELECT …)` |
+| `binary[T]` | `Pred` | comparison `l op r` (`=`, `<>`, `<`, `<=`, `>`, `>=`) |
+| `arith[T]` | `Expr[T]` | arithmetic `(l op r)` (`+`, `-`, `*`, `/`). It parenthesizes itself, so nested arithmetic is unambiguous: `atla.Add(user.Age.Add(1), 2)` → `(("users"."age" + $1) + $2)`. |
+| `unary[T]` | `Pred` | `NOT (x)`, `x IS NULL`, `x IS NOT NULL` |
+| `logical` | `Pred` | `(a AND b AND c)`. Nested nodes with the same operator are flattened, and a single operand is emitted without parentheses. With no operands, `And()` compiles to `1 = 1` and `Or()` to `1 = 0`. |
+| `inList` | `Pred` | `x IN ($1, $2)`. An empty list compiles to `1 = 0` (`NOT IN` → `1 = 1`). Non-generic: the typed `In` / `NotIn` functions convert the values to `[]any`. |
+| `between` | `Pred` | `x BETWEEN $1 AND $2`. Non-generic, like `inList`. |
+| `like` | `Pred` | `x LIKE $1`, with ` ESCAPE '\'` for `Contains` / `HasPrefix` / `HasSuffix`. `ILike` renders `x ILIKE $1` when `Dialect.NativeILike()` is true and `LOWER(x) LIKE LOWER($1)` otherwise. |
+| `funcCall[T]` | `Expr[T]` | `COUNT(*)`, `COUNT(DISTINCT x)`, `MAX(x)`, `COALESCE(a, b)` |
+| `raw[T]` | `Expr[T]` | user SQL with `?` markers rewritten to dialect placeholders (see `Raw`, §2.4) |
+| `nullOf[T]` | `Expr[sql.Null[T]]` | `x` unchanged; presents a non-null expression as nullable (`Column.Null()`, `NullNumberColumn` arithmetic) |
+| `subquery` | wrapped by `Subquery[T]` / `AnySubquery` | `(SELECT …)`. Placeholder numbering continues from the enclosing statement. Compiling a zero `Subquery` / `AnySubquery` fails with `atla: empty subquery`. |
+| `inQuery` | `Pred` | `x IN (SELECT …)` |
 | `exists` | `Pred` | `EXISTS (SELECT …)` |
+
+**Operand parenthesization.** The compiler adds parentheses only where SQL
+precedence would otherwise change the meaning:
+
+- *Predicate-shaped* nodes are comparisons (`binary`), `logical`, `unary`
+  (`NOT`, `IS [NOT] NULL`), `inList`, `between`, `like`, `inQuery` and `exists`.
+  As the operand of a comparison, `IN` / `NOT IN`, `IN (SELECT …)`, `BETWEEN`
+  (subject or bounds) or `IS [NOT] NULL`, a predicate-shaped node is wrapped in
+  parentheses: `"users"."active" = ("users"."age" = $1)`,
+  `("t"."a" = $1) IN ($2)`, `(NOT ("t"."a" = $1)) IS NULL`. A `logical` node with
+  two or more operands already carries its own parentheses and is not wrapped again.
+- Other nodes (columns, parameters, function calls, `arith`, `nullOf`, `raw`) are
+  rendered bare as operands.
+- A `raw` node is wrapped in parentheses when it is an operand of a `logical` node
+  with two or more operands (`((a = 1 OR b = 2) AND "users"."id" = $1)`) or of an
+  `arith` node (`((a + b) * $1)`). Everywhere else, including as the operand of a
+  comparison, it is inserted bare (see `Raw`, §2.4).
 
 ### 2.4 Helper Functions
 
@@ -211,6 +231,21 @@ func Exists(sub AnySubquery) Pred
 
 Aggregates that can return SQL `NULL` are typed as `sql.Null[T]`. As a result,
 scanning their projections can never fail on NULL.
+
+**`Raw`.** Each `?` in `sql` becomes the next bind placeholder and takes the next
+value from `args`. `??` produces a literal `?`, for Postgres jsonb operators such as
+`data ?? 'key'`. If the number of `?` markers differs from `len(args)`, compilation
+fails and `ToSQL` / the terminal method returns
+`atla: Raw: N placeholders, M args` (N markers, M args). `args` are copied when
+`Raw` is called.
+
+The fragment is inserted verbatim. It is parenthesized only inside a multi-operand
+`And` / `Or` and inside arithmetic (§2.3). As the operand of a comparison, `IN`,
+`BETWEEN` or `IS NULL` it stays bare, so
+`atla.EQ(atla.Raw[int64]("length(?) + ?", s, 1), 3)` renders
+`length($1) + $2 = $3`. A fragment containing an operator of
+lower precedence than the one it is combined with (for example `a OR b` compared
+with `=`) must be parenthesized by the caller.
 
 **Operators on arbitrary expressions.** `Expr[T]` is a sealed interface without
 exported methods, so the column methods are sugar. The general forms are generic
@@ -247,10 +282,34 @@ type Dialect interface {
     AppendIdent(b []byte, ident string) []byte     // quoting + escaping
     AppendPlaceholder(b []byte, n int) []byte      // n is 1-based
     Returning() bool                               // RETURNING supported
-    AppendILike(b []byte, left, right func([]byte) []byte) []byte
+    NativeILike() bool                             // ILIKE operator available
+    AppendLock(b []byte, l Lock) []byte            // row lock clause, leading space
+    AppendLimitOffset(b []byte, limit, offset int) []byte // LIMIT/OFFSET literals, leading space
     MaxParams() int                                // bind-parameter limit used for chunking
     Classify(err error) ErrorKind                  // driver error -> kind (KindUnknown if not recognized)
 }
+
+// Lock describes a row lock clause such as FOR UPDATE.
+type Lock struct {
+    Strength LockStrength
+    Wait     LockWait
+    Of       []string // already-quoted table references for the OF clause
+}
+
+type LockStrength uint8
+
+const (
+    LockUpdate LockStrength = iota // FOR UPDATE
+    LockShare                      // FOR SHARE
+)
+
+type LockWait uint8
+
+const (
+    WaitDefault    LockWait = iota // wait for locked rows
+    WaitNoWait                     // NOWAIT
+    WaitSkipLocked                 // SKIP LOCKED
+)
 
 // ErrorKind lives in package dialect so that dialect does not import atla
 // (atla imports dialect). atla maps each kind to its sentinel error (§10).
@@ -276,6 +335,17 @@ Each dialect value is a stateless struct. Generated code references one dialect
 chosen at generation time, because the precomputed SQL constants already embed
 its quoting and placeholders.
 
+- **`NativeILike`.** The compiler expands `ILike` itself: `x ILIKE $1` when it
+  returns true, `LOWER(x) LIKE LOWER($1)` otherwise.
+- **`AppendLock`** appends the lock clause with a leading space. Postgres renders
+  ` FOR UPDATE` / ` FOR SHARE`, then ` OF a, b` when `Of` is non-empty, then
+  ` NOWAIT` / ` SKIP LOCKED`. The `Of` entries are emitted verbatim, so they must
+  already be quoted (`"users"`). SQLite has no row locks and appends nothing.
+- **`AppendLimitOffset`** appends ` LIMIT n` and/or ` OFFSET m` as integer literals,
+  never as bind parameters. A negative value means unset, and when both are unset
+  nothing is appended. SQLite does not accept `OFFSET` without `LIMIT`, so with only
+  an offset it renders ` LIMIT -1 OFFSET m`.
+
 | Dialect | Quote | Placeholder | RETURNING | ILIKE | Upsert |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | Postgres | `"x"` | `$1` | yes | native | `ON CONFLICT (…) DO UPDATE` |
@@ -290,6 +360,7 @@ type compiler struct {
     d    dialect.Dialect
     buf  []byte
     args []any
+    err  error // first compilation error, e.g. a Raw placeholder mismatch
 }
 
 func (c *compiler) param(v any) {                  // append placeholder + arg
@@ -298,8 +369,14 @@ func (c *compiler) param(v any) {                  // append placeholder + arg
 }
 ```
 
-- The compiler starts from the generated static prefix (the `SELECT … FROM "users"`
-  constant). `buf` is pre-sized to `len(prefix) + 128` and is not pooled in v1.
+- The compiler starts from an optional static prefix and then renders the statement
+  node, whose fixed parts (`Ident`, `SelectList`, `ReturningList`) are precomputed
+  strings on `Table`. `buf` is pre-sized to `len(prefix) + 128` and is not pooled
+  in v1.
+- Placeholder numbering continues across every node appended to the same compiler,
+  so subqueries share the enclosing statement's argument list.
+- The first compilation error is kept, and `ToSQL` / the terminal method returns it
+  instead of SQL.
 - Nodes dispatch through `appendSQL(*compiler)`, with no type switch.
 - The result is converted to `string` once at the end.
 - `ToSQL() (string, []any, error)` is exposed on every builder for debugging and
@@ -326,9 +403,27 @@ func SetExpr[T any](e Expr[T]) Opt[T]  // set to an SQL expression, e.g. user.Ag
 func SetExprPtr[T any](e Expr[T]) Opt[*T] // expression into a nullable column (wraps e in an internal
                                            // adapter node that implements Expr[*T]; SQL is unchanged)
 
-func (o Opt[T]) IsSet() bool
-func (o Opt[T]) Get() (T, bool)
+func (o Opt[T]) IsSet() bool    // set to a value or to an expression
+func (o Opt[T]) Get() (T, bool) // the Go value; see below
+
+// AppendTo appends col and o's value to cols / vals when o is set and returns
+// them unchanged otherwise. For use by generated code.
+func (o Opt[T]) AppendTo(cols []string, vals []any, col string) ([]string, []any)
 ```
+
+- **`Get`** reports only the value state. It returns the value and `true` for an
+  `Opt` created by `Some`, `SomePtr` or `Null` (`Null` yields a nil pointer and
+  `true`). For an unset `Opt`, and for one created by `SetExpr` / `SetExprPtr`, it
+  returns the zero value and `false`; use `IsSet` to tell "set to an expression"
+  from "unset".
+- **`AppendTo`** is how generated `Insert` / `Update` methods build their column
+  and value lists for `NewInsert` / `NewUpdate` (§6.1). For a value it appends the
+  Go value, which the statement binds as a parameter. For an `Opt` created by
+  `SetExpr` / `SetExprPtr` it appends the expression itself, which the statement
+  renders as SQL. Like the built-in `append`, it may write into the spare capacity
+  of `cols` and `vals`, so callers keep only the returned slices.
+- **`SetExprPtr`** wraps `e` in an unexported adapter node that implements
+  `Expr[*T]` and renders the SQL of `e` unchanged.
 
 > [!NOTE]
 > **Untyped constants.** Go infers `atla.Some(20)` as `Opt[int]`, which does not fit
@@ -338,7 +433,7 @@ func (o Opt[T]) Get() (T, bool)
 
 ---
 
-## 5. Execution Layer (`atla.go`, `tx.go`)
+## 5. Execution Layer (`executor.go`, `tx.go`)
 
 ### 5.1 `Executor`
 
@@ -411,32 +506,57 @@ type TxRunner interface {
 `RunTx` chooses the first case that matches `ex`:
 
 1. **`TxRunner`**: delegate to it.
-2. **`*TxExecutor`** (a nested call): use `SAVEPOINT atla_sp_<depth>` /
-   `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`, and pass `fn` a child `*TxExecutor`
-   with `depth+1`. Passing isolation options to a nested call returns an error.
+2. **`*TxExecutor`** (a nested call): run `fn` inside `SAVEPOINT atla_sp_<n>`,
+   where `n` is the parent's depth + 1, and pass `fn` a child `*TxExecutor` with
+   depth `n`. Passing any `TxOption` to a nested call returns
+   `atla.ErrTxOptionsNested` before any statement is sent.
 3. **`*sql.Tx`** (the user passed a raw transaction): wrap it in a `*TxExecutor` with
-   depth 0, then proceed as in case 2. atla never commits a transaction it did not
-   begin.
-4. **`TxBeginner`**: call `BeginTx` and run `fn` with a new `*TxExecutor`. Commit when
-   `fn` returns `nil`. When `fn` returns an error, roll back and return that error
-   joined with any rollback error. When `fn` panics, roll back and re-panic.
+   depth 0, then proceed as in case 2 (so `fn` runs inside `atla_sp_1`). atla never
+   commits or rolls back a transaction it did not begin.
+4. **`TxBeginner`**: call `BeginTx` with the options and run `fn` with a new
+   `*TxExecutor`. Commit when `fn` returns `nil`. When `fn` returns an error, roll
+   back and return that error joined with any rollback error (the error is returned
+   unchanged when the rollback succeeds). When `fn` panics, roll back and re-panic
+   with the original value.
 5. **Anything else**: return `atla.ErrTxUnsupported`.
+
+**Ending a savepoint** (cases 2 and 3):
+
+- When `fn` returns `nil`, the savepoint is released (`RELEASE SAVEPOINT atla_sp_<n>`).
+- When `fn` returns an error or panics, the runtime sends
+  `ROLLBACK TO SAVEPOINT atla_sp_<n>` and then `RELEASE SAVEPOINT atla_sp_<n>`.
+  `ROLLBACK TO` leaves the savepoint open, so releasing it keeps failed sibling
+  calls in a loop from accumulating open savepoints. The error is `fn`'s error
+  joined with any error from these statements; a panic continues after them.
+- When `RELEASE SAVEPOINT` fails (for example on Postgres after `fn` swallowed a
+  statement error), the runtime rolls back to the savepoint and releases it as
+  above, so the outer transaction stays usable, and returns the release error
+  joined with any error from that rollback.
+- The `RELEASE` / `ROLLBACK TO` statements run with `context.WithoutCancel(ctx)`.
+  If `fn` cancelled `ctx`, the savepoint is still rolled back, so `fn`'s writes
+  cannot reach the outer commit. These statements can therefore run after the
+  caller's cancellation, bounded by the lifetime of the transaction.
 
 There is no automatic retry. `errors.Is(err, atla.ErrSerialization)` lets callers
 build their own retry loop.
 
 ---
 
-## 6. Select Builder (`query.go`)
+## 6. Select Builder (`table.go`, `select.go`)
 
 ### 6.1 Runtime Core
 
 ```go
-// Table describes a generated table to the runtime.
+// Table describes a generated table to the runtime. Every field is precomputed
+// by the generator. For use by generated code.
 type Table[R any] struct {
-    Name       string // quoted, possibly schema-qualified
-    SelectList string // precomputed `"users"."id", "users"."email", …`
-    NumCols    int
+    Dialect       dialect.Dialect // the dialect the table's SQL is written for
+    Ident         string          // quoted base table name, possibly schema-qualified
+    RawName       string          // unquoted name, reported in QueryInfo.Table and DBError.Table
+    AliasName     string          // quoted alias, or "" when not aliased
+    SelectList    string          // qualified column list `"users"."id", "users"."email", …`
+    ReturningList string          // unqualified column list for RETURNING `"id", "email", …`
+    NumCols       int             // number of columns in SelectList
 
     // Scan is the single-table fast path: one rows.Scan call into the struct.
     Scan func(*sql.Rows) (*R, error)
@@ -452,6 +572,8 @@ type Table[R any] struct {
     // It is nil for tables without a primary key.
     NewNullableRowScanner func() RowScanner[R]
 
+    // Alias returns the table aliased as alias (AliasName set, SelectList
+    // qualified by the alias).
     Alias func(alias string) Table[R]
 }
 
@@ -461,7 +583,15 @@ type RowScanner[R any] interface {
 }
 
 // Select is the immutable core embedded by generated XxxQuery types.
-type Select[R any] struct { /* executor, dialect, table, where, order, limit, offset, lock, … */ }
+type Select[R any] struct { /* executor, table, where, order, limit, offset, lock */ }
+
+// Core constructors, for use by generated code. ex may be nil when the
+// statement is only rendered with ToSQL. cols are quoted column names and vals
+// their values, in the same order; both slices are copied.
+func NewSelect[R any](ex Executor, t Table[R]) Select[R]
+func NewInsert[R any](ex Executor, t Table[R], cols []string, vals []any) Insert[R]
+func NewUpdate[R any](ex Executor, t Table[R], cols []string, vals []any) Update[R]
+func NewDelete[R any](ex Executor, t Table[R]) Delete[R]
 
 func (q Select[R]) Where(ps ...Pred) Select[R]
 func (q Select[R]) OrderBy(os ...Order) Select[R]
@@ -470,17 +600,46 @@ func (q Select[R]) Offset(n int) Select[R]
 func (q Select[R]) ForUpdate(opts ...LockOption) Select[R]   // SkipLocked(), NoWait(), Of(...)
 func (q Select[R]) ForShare(opts ...LockOption) Select[R]
 
+type LockOption func(*dialect.Lock)
+func SkipLocked() LockOption
+func NoWait() LockOption
+func Of(tables ...string) LockOption // already-quoted table names or aliases, e.g. `"users"`
+
 func (q Select[R]) All(ctx context.Context) ([]*R, error)
-func (q Select[R]) First(ctx context.Context) (*R, error)   // adds LIMIT 1; ErrNotFound if none
-func (q Select[R]) One(ctx context.Context) (*R, error)     // adds LIMIT 2; ErrNotFound / ErrMultipleResults
+func (q Select[R]) First(ctx context.Context) (*R, error)   // LIMIT 1; ErrNotFound if none
+func (q Select[R]) One(ctx context.Context) (*R, error)     // LIMIT 2; ErrNotFound / ErrMultipleResults
 func (q Select[R]) Count(ctx context.Context) (int64, error)
-func (q Select[R]) Exist(ctx context.Context) (bool, error) // SELECT EXISTS(...)
+func (q Select[R]) Exist(ctx context.Context) (bool, error) // SELECT EXISTS (SELECT 1 …)
 func (q Select[R]) Iter(ctx context.Context) iter.Seq2[*R, error] // streams; rows closed when the loop ends
 func (q Select[R]) Subquery() AnySubquery
 func (q Select[R]) ToSQL() (string, []any, error)
 ```
 
-Repeated calls to `Where` are combined with `AND`, as in atla.
+- **FROM item.** The table renders as `Ident`, or `Ident AS AliasName` when
+  `AliasName` is set. `NewInsert` / `NewUpdate` / `NewDelete` render only `Ident`.
+- **Values in `NewInsert` / `NewUpdate`.** A `vals` entry that is an atla expression
+  (for example from `Opt.AppendTo` on a `SetExpr` value, §4) is rendered as SQL. Any
+  other entry becomes a bind parameter. If `cols` and `vals` differ in length,
+  compilation fails with `atla: <op> <table>: N columns, M values`. `NewInsert` with
+  no columns renders `INSERT INTO "t" DEFAULT VALUES`.
+- **`Where`.** Repeated calls are combined with `AND`, as in atla.
+- **`Limit` / `Offset`** are rendered as integer literals, not bind parameters, by
+  `Dialect.AppendLimitOffset` (§3.1). A negative value leaves the limit or offset
+  unset; this is also the initial state.
+- **Locks.** `ForUpdate` / `ForShare` replace any earlier lock. The clause follows
+  `LIMIT` / `OFFSET`. On SQLite it renders nothing. A query with a lock reports
+  `QueryInfo.ReadOnly == false`.
+- **`All`** returns a nil slice and a nil error when no row matches.
+- **`First` / `One`** replace any limit with `LIMIT 1` / `LIMIT 2` for that call; the
+  receiver is unchanged.
+- **`Count`** always drops `ORDER BY`. Without a limit, an offset or a lock it
+  renders `SELECT COUNT(*) FROM … WHERE …`. With a limit, an offset or a lock it
+  counts the query as a subquery, because the limit must apply before counting and
+  Postgres rejects `FOR UPDATE` next to an aggregate:
+  `SELECT COUNT(*) FROM (SELECT 1 FROM … LIMIT n) AS "atla_count"`.
+- **`Exist`** drops `ORDER BY` and keeps everything else:
+  `SELECT EXISTS (SELECT 1 FROM … WHERE … LIMIT n FOR UPDATE)`.
+- **`Iter`** yields `(nil, err)` once on an error and stops.
 
 ### 6.2 Generated Wrapper Pattern
 
@@ -544,7 +703,11 @@ client.User.Update(dbgen.UserUpdate{Name: atla.Some("Bob"), Age: atla.SetExpr(us
 - `UserUpdate` contains every non-PK column as `Opt`. PK columns are not updatable
   through `UserUpdate` (my call: avoids accidental key rewrites; use `Raw` if
   needed).
-- If no field is set, the builder returns `atla.ErrEmptyUpdate`.
+- If no field is set, `ToSQL`, `Exec` and `Save` return `atla.ErrEmptyUpdate`
+  without sending anything. This check comes before the unsafe-mutation guard
+  (§7.4), so an empty update without `Where` reports `ErrEmptyUpdate`.
+- `Save` returns every updated row. When no row matches, it returns a nil slice
+  and a nil error.
 
 ### 7.3 Delete
 
@@ -554,9 +717,24 @@ client.User.Delete().Where(user.ID.EQ(id)).Exec(ctx) // (int64, error)
 
 ### 7.4 Unsafe-Mutation Guard
 
-`Update` and `Delete` without any `Where` return `atla.ErrUnsafeMutation` from
-`Exec` / `Save`, unless `.AllowFullTable()` was called. The check happens before
-any SQL is sent.
+`Update` and `Delete` without any `Where` predicate return `atla.ErrUnsafeMutation`
+from `ToSQL`, `Exec` and `Save`, unless `.AllowFullTable()` was called. The check
+happens before any SQL is sent; `Exec` and `Save` go through the same check as
+`ToSQL`. On `Update`, `ErrEmptyUpdate` is checked first (§7.2), and `Save` checks
+both guards before `ErrReturningUnsupported`.
+
+The guard checks the effective `WHERE`, not the number of predicates: it sees
+through empty conjunctions. The combined `WHERE` counts as absent when it is
+always true by construction: an `AND` whose operands are all always true
+(including `atla.And()` with no operands, which renders `1 = 1`), or an `OR`
+with an always-true operand. So `Where(atla.And())`, `Where(atla.And(atla.And()))`
+and `Where(atla.Or(atla.And()))` fail with `ErrUnsafeMutation`, and a dynamic
+filter such as `Where(atla.And(filters...))` with an empty `filters` cannot
+silently target every row. Predicates whose effect depends on data are not
+inspected: an empty `NotIn()` (`1 = 1`) and `Raw` fragments count as real
+predicates, and an empty `atla.Or()` (`1 = 0`, matches nothing) is not a
+full-table risk. To intentionally update or delete every row, call
+`.AllowFullTable()`.
 
 ### 7.5 Generated AOT Shortcuts
 
@@ -691,6 +869,7 @@ var (
     ErrReturningUnsupported  = errors.New("atla: RETURNING not supported for this table/dialect")
     ErrNoPrimaryKey          = errors.New("atla: table has no primary key")
     ErrIterEdgesSingleConn   = errors.New("atla: Iter with edges needs a pooled executor; use All inside transactions")
+    ErrTxOptionsNested       = errors.New("atla: transaction options are not allowed on a nested transaction")
 
     // Database error kinds (classified from driver errors)
     ErrUniqueViolation       = errors.New("atla: unique violation")
@@ -708,11 +887,18 @@ type DBError struct {
     Err   error  // the original driver error
 }
 
-func (e *DBError) Error() string
+func (e *DBError) Error() string   // "atla: " + Op + " " + Table + ": " + Err.Error()
 func (e *DBError) Unwrap() []error { return []error{e.Kind, e.Err} }
 ```
 
 So `errors.Is(err, atla.ErrUniqueViolation)` and `errors.As(err, &pgErr)` both work.
+
+`Error` formats as `atla: <op> <table>: <driver error>`, for example
+`atla: insert users: <driver message>`. `Table` is the table's `RawName`; when it
+is empty the table part is empty too (`atla: exec : <driver message>`).
+
+`ErrTxOptionsNested` is returned by `RunTx` when options are passed to a nested
+transaction (§5.2).
 
 **Classification without driver imports.** Each dialect's `Classify` returns a
 `dialect.ErrorKind`, and `atla` maps it to the sentinel above. Detection uses
@@ -731,6 +917,11 @@ once at startup. The runtime cannot import those drivers, so it cannot classify 
 errors on its own.
 
 Errors that cannot be classified are returned unchanged and are not wrapped.
+An error that already contains a `*DBError` (checked with `errors.As`) is also
+returned unchanged, so a classified error is never wrapped twice.
+
+The dialect is consulted first; registered classifiers run afterwards, in
+registration order, and the first kind other than `KindUnknown` wins.
 
 ---
 

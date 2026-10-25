@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gocritic
+    - revive
+    - misspell
+    - unconvert
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/hirokazumiyaji/atla-go
