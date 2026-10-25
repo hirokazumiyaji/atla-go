@@ -112,13 +112,19 @@ func TestApply(t *testing.T) {
 		Enums: []ir.Enum{
 			{DBName: "user_role", Values: []ir.EnumValue{{DB: "admin"}, {DB: ""}, {DB: "in-progress"}}},
 			{DBName: "mood"},
+			{DBName: "level", Values: []ir.EnumValue{{DB: "1st"}, {DB: "2"}, {DB: "x2"}}},
+			{DBName: "2fa_method", Values: []ir.EnumValue{{DB: "sms"}}},
 		},
 		Tables: []ir.Table{
 			{DBName: "api_keys", Columns: []ir.Column{{DBName: "id"}, {DBName: "user_id"}}},
 			{DBName: "people", Columns: []ir.Column{{DBName: "id"}}},
-			{DBName: "user_profiles", Columns: []ir.Column{{DBName: "id"}, {DBName: "edges"}, {DBName: "avatar_url"}}},
+			{DBName: "user_profiles", Columns: []ir.Column{{DBName: "id"}, {DBName: "edges"}, {DBName: "avatar_url"}, {DBName: "table"}, {DBName: "columns"}, {DBName: "as"}, {DBName: "table_name"}}},
 			{DBName: "2fa_codes", Columns: []ir.Column{{DBName: "id"}}},
 			{DBName: "types", Columns: []ir.Column{{DBName: "id"}}},
+			{DBName: "dns", Columns: []ir.Column{{DBName: "id"}}},
+			{DBName: "https", Columns: []ir.Column{{DBName: "id"}}},
+			{DBName: "user_dns", Columns: []ir.Column{{DBName: "id"}}},
+			{DBName: "user_ids", Columns: []ir.Column{{DBName: "id"}}},
 		},
 	}
 	o := Overrides{Tables: map[string]string{"people": "Person"}, RootPackage: "dbgen"}
@@ -131,6 +137,10 @@ func TestApply(t *testing.T) {
 		"user_profiles": {"UserProfile", "userprofile"},
 		"2fa_codes":     {"X2faCode", "x2facode"},
 		"types":         {"Type", "typetbl"},
+		"dns":           {"DNS", "dns"},
+		"https":         {"HTTPS", "https"},
+		"user_dns":      {"UserDNS", "userdns"},
+		"user_ids":      {"UserID", "userid"},
 	}
 	for name, want := range wantTables {
 		tbl := findTable(t, s, name)
@@ -144,6 +154,12 @@ func TestApply(t *testing.T) {
 	}
 	if got := findColumn(t, up, "avatar_url").GoName; got != "AvatarURL" {
 		t.Errorf("avatar_url GoName = %q, want AvatarURL", got)
+	}
+	// The column package declares const Table, type Columns and func As.
+	for col, want := range map[string]string{"table": "TableCol", "columns": "ColumnsCol", "as": "AsCol", "table_name": "TableName"} {
+		if got := findColumn(t, up, col).GoName; got != want {
+			t.Errorf("%s GoName = %q, want %q", col, got, want)
+		}
 	}
 	if got := findColumn(t, findTable(t, s, "api_keys"), "user_id").GoName; got != "UserID" {
 		t.Errorf("user_id GoName = %q, want UserID", got)
@@ -163,6 +179,16 @@ func TestApply(t *testing.T) {
 	if mood.GoName != "Mood" || len(mood.Values) != 0 {
 		t.Errorf("empty enum = %#v, want GoName Mood and no values", mood)
 	}
+	// Value constants keep a leading digit; standalone names get the X prefix.
+	level := s.Enums[2]
+	for i, want := range []string{"Level1st", "Level2", "LevelX2"} {
+		if got := level.Values[i].Go; got != want {
+			t.Errorf("value %q Go = %q, want %q", level.Values[i].DB, got, want)
+		}
+	}
+	if got := s.Enums[3]; got.GoName != "X2faMethod" || got.Values[0].Go != "X2faMethodSms" {
+		t.Errorf("enum 2fa_method = %#v, want GoName X2faMethod, value X2faMethodSms", got)
+	}
 }
 
 func TestApplyCollisions(t *testing.T) {
@@ -177,6 +203,16 @@ func TestApplyCollisions(t *testing.T) {
 		msg := applyErr(t, &ir.Schema{Tables: tables("user", "user_insert")}, Overrides{})
 		wantContains(t, msg, `"UserInsert"`, `"user_insert"`, `"user"`, "insert type", "names.tables")
 	})
+	for _, q := range []struct{ table, id, what string }{
+		{"user_inserts", "UserInsertQuery", "insert query type"},
+		{"user_updates", "UserUpdateQuery", "update query type"},
+		{"user_deletes", "UserDeleteQuery", "delete query type"},
+	} {
+		t.Run("model clashes with "+q.what, func(t *testing.T) {
+			msg := applyErr(t, &ir.Schema{Tables: tables("users", q.table)}, Overrides{})
+			wantContains(t, msg, `"`+q.id+`"`, `"`+q.table+`"`, `"users"`, q.what, "names.tables")
+		})
+	}
 	t.Run("reserved root identifier", func(t *testing.T) {
 		msg := applyErr(t, &ir.Schema{Tables: tables("client")}, Overrides{})
 		wantContains(t, msg, `"Client"`, `"client"`, "reserved")
@@ -259,8 +295,10 @@ func TestApplyCollisions(t *testing.T) {
 		}
 		first := applyErr(t, build(), Overrides{Tables: map[string]string{"zz": "Zz", "aa": "Aa"}})
 		lines := strings.Split(first, "\n")
-		if len(lines) != 5 {
-			t.Fatalf("got %d errors, want 5:\n%s", len(lines), first)
+		// user_insert clashes twice: UserInsert (insert type of User) and
+		// UserInsertQuery (insert query type of User, query type of UserInsert).
+		if len(lines) != 6 {
+			t.Fatalf("got %d errors, want 6:\n%s", len(lines), first)
 		}
 		wantContains(t, lines[0], `"aa"`)
 		wantContains(t, lines[1], `"zz"`)

@@ -136,10 +136,11 @@ func PackageName(model, rootPkg string) string {
 }
 
 // modelName singularizes the last word of a table name and Pascal-cases it.
+// A last word that is itself an initialism ("dns", "https") is kept as is.
 func modelName(table string) string {
 	ws := words(table)
-	if len(ws) > 0 {
-		ws[len(ws)-1] = Singular(ws[len(ws)-1])
+	if n := len(ws); n > 0 && !initialisms[strings.ToUpper(ws[n-1])] {
+		ws[n-1] = Singular(ws[n-1])
 	}
 	return join(ws)
 }
@@ -191,15 +192,20 @@ func camelBoundary(seg string, i int) bool {
 // join capitalizes and concatenates words, prefixing "X" when the result
 // starts with a digit.
 func join(ws []string) string {
-	var b strings.Builder
-	for _, w := range ws {
-		b.WriteString(capitalize(w))
-	}
-	out := b.String()
+	out := concat(ws)
 	if out != "" && isDigit(rune(out[0])) {
 		return "X" + out
 	}
 	return out
+}
+
+// concat capitalizes and concatenates words.
+func concat(ws []string) string {
+	var b strings.Builder
+	for _, w := range ws {
+		b.WriteString(capitalize(w))
+	}
+	return b.String()
 }
 
 func capitalize(w string) string {

@@ -69,6 +69,25 @@ func TestSingular(t *testing.T) {
 	}
 }
 
+func TestModelName(t *testing.T) {
+	cases := map[string]string{
+		"users":     "User",
+		"api_keys":  "APIKey",
+		"user_ids":  "UserID",
+		"dns":       "DNS",
+		"https":     "HTTPS",
+		"user_dns":  "UserDNS",
+		"acl":       "ACL",
+		"uuids":     "UUID",
+		"2fa_codes": "X2faCode",
+	}
+	for in, want := range cases {
+		if got := modelName(in); got != want {
+			t.Errorf("modelName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestPackageName(t *testing.T) {
 	cases := []struct{ model, root, want string }{
 		{"UserProfile", "dbgen", "userprofile"},

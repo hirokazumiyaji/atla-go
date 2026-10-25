@@ -30,7 +30,15 @@ var derivedTypes = []struct{ suffix, what string }{
 	{"Repo", "repo type"},
 	{"Table", "table variable"},
 	{"Key", "key type"},
+	{"InsertQuery", "insert query type"},
+	{"UpdateQuery", "update query type"},
+	{"DeleteQuery", "delete query type"},
 }
+
+// reservedColumn are the identifiers each column package declares besides one
+// variable per column (generator-spec §7.1); a column field with one of these
+// names gets the suffix "Col".
+var reservedColumn = setOf("Edges", "Table", "Columns", "As")
 
 // Apply fills Table.Model, Table.Package, Column.GoName, Enum.GoName and
 // EnumValue.Go. It reports every invalid override and every identifier clash,
@@ -84,10 +92,10 @@ func nameTable(t *ir.Table, o Overrides) []error {
 	for j := range t.Columns {
 		c := &t.Columns[j]
 		c.GoName = Pascal(c.DBName)
-		switch c.GoName {
-		case "Edges":
-			c.GoName = "EdgesCol"
-		case "":
+		switch {
+		case reservedColumn[c.GoName]:
+			c.GoName += "Col"
+		case c.GoName == "":
 			errs = append(errs, fmt.Errorf("table %q: column %q: cannot derive a Go identifier from the name", t.DBName, c.DBName))
 		}
 	}
@@ -100,7 +108,8 @@ func nameEnum(e *ir.Enum) []error {
 		return []error{fmt.Errorf("enum %q: cannot derive a Go identifier from the name", e.DBName)}
 	}
 	for k := range e.Values {
-		v := Pascal(e.Values[k].DB)
+		// The value follows the type name, so a leading digit needs no prefix.
+		v := concat(words(e.Values[k].DB))
 		if v == "" {
 			v = "Empty"
 		}
