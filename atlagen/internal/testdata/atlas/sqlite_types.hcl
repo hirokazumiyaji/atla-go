@@ -68,5 +68,20 @@ table "codes" {
     columns = [column.id]
   }
 }
+table "kv" {
+  schema = schema.main
+  column "id" {
+    null = false
+    type = integer
+  }
+  column "v" {
+    null = true
+    type = blob
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  without_rowid = true
+}
 schema "main" {
 }

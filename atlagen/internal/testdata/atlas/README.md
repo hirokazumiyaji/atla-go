@@ -43,6 +43,7 @@ CREATE TABLE codes(
   label TEXT NOT NULL,
   label_upper TEXT NOT NULL GENERATED ALWAYS AS (upper(label)) STORED
 );
+CREATE TABLE kv(id INTEGER PRIMARY KEY, v) WITHOUT ROWID;
 ```
 
 ## Foreign keys into schemas that were not inspected

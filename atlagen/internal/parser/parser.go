@@ -267,6 +267,16 @@ func (p *parser) parseTable(tb object) (ir.Table, error) {
 	for _, c := range t.PrimaryKey {
 		inPK[c] = true
 	}
+	withoutRowid, err := boolAttr(tb.body, "without_rowid")
+	if err != nil {
+		return ir.Table{}, wrap(err)
+	}
+	// SQLite: a single-column INTEGER PRIMARY KEY is an alias of the rowid,
+	// unless the table is WITHOUT ROWID (printed without_rowid = true).
+	rowidPK := ""
+	if p.dialect == "sqlite" && len(t.PrimaryKey) == 1 && !withoutRowid {
+		rowidPK = t.PrimaryKey[0]
+	}
 
 	known := make(map[string]bool)
 	columnIndex := 0
@@ -274,7 +284,7 @@ func (p *parser) parseTable(tb object) (ir.Table, error) {
 		if b.Type != "column" {
 			continue
 		}
-		c, err := p.parseColumn(b, columnIndex, t.PrimaryKey, inPK)
+		c, err := p.parseColumn(b, columnIndex, rowidPK, inPK)
 		if err != nil {
 			return ir.Table{}, wrap(err)
 		}
@@ -334,7 +344,9 @@ func checkColumns(label string, cols []string, known map[string]bool) error {
 	return nil
 }
 
-func (p *parser) parseColumn(b *hclsyntax.Block, index int, pk []string, inPK map[string]bool) (ir.Column, error) {
+// parseColumn reads one column block. rowidPK names the table's rowid-alias
+// candidate ("" when there is none).
+func (p *parser) parseColumn(b *hclsyntax.Block, index int, rowidPK string, inPK map[string]bool) (ir.Column, error) {
 	name := blockName(b)
 	if name == "" {
 		return ir.Column{}, fmt.Errorf("column at index %d has no name", index)
@@ -374,7 +386,7 @@ func (p *parser) parseColumn(b *hclsyntax.Block, index int, pk []string, inPK ma
 	_, asAttr := b.Body.Attributes["as"]
 	c.Generated = asAttr || hasBlock(b.Body, "as")
 	// SQLite: an INTEGER PRIMARY KEY column is an alias of the rowid.
-	if p.dialect == "sqlite" && len(pk) == 1 && pk[0] == name && strings.ToLower(rawType) == "integer" {
+	if rowidPK == name && strings.ToLower(rawType) == "integer" {
 		c.HasDefault = true
 	}
 	return c, nil

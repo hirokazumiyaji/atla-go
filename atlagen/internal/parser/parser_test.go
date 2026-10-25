@@ -864,6 +864,11 @@ func TestParseSQLiteRowidAlias(t *testing.T) {
 	codes := mustTable(t, s, "codes")
 	equal(t, "codes.id.HasDefault", mustColumn(t, codes, "id").HasDefault, false)
 
+	// A WITHOUT ROWID table (printed without_rowid = true) has no rowid to alias.
+	kvID := mustColumn(t, mustTable(t, s, "kv"), "id")
+	equal(t, "kv.id", kvID, ir.Column{DBName: "id", RawType: "integer", InPK: true})
+	equal(t, "kv.id.RequiredForInsert", kvID.RequiredForInsert(), true)
+
 	// The rule is SQLite-only.
 	pg := parseFixture(t, "sqlite_types.hcl", "postgres", "")
 	equal(t, "postgres things.id.HasDefault", mustColumn(t, mustTable(t, pg, "things"), "id").HasDefault, false)
