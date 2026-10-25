@@ -245,7 +245,8 @@ naming (§3) and mapping (§4) stages.
 - **HasDefault** is set when the column has a `default`, an `identity` block,
   `auto_increment = true`, a `serial`-family type (`serial`, `serial2`, `serial4`,
   `serial8`, `smallserial`, `bigserial`), or (SQLite) is the single-column
-  `INTEGER PRIMARY KEY`, an alias of the rowid.
+  `INTEGER PRIMARY KEY`, an alias of the rowid. A `WITHOUT ROWID` table (printed
+  `without_rowid = true`) has no rowid, so its `INTEGER PRIMARY KEY` has no default.
 - **Generated** is set by an `as { expr = "…" }` block (what Atlas prints) or an
   `as = "…"` attribute.
 - **Uniques** come from Postgres `unique "<name>" {}` blocks (Atlas prints UNIQUE
@@ -279,20 +280,21 @@ naming (§3) and mapping (§4) stages.
 
 | Input | Rule | Example |
 | :--- | :--- | :--- |
-| Table → model | singularize the last word, then PascalCase with Go initialisms; `names.tables` wins | `users` → `User`, `user_profiles` → `UserProfile`, `api_keys` → `APIKey`, `people` → `Person` |
+| Table → model | singularize the last word, then PascalCase with Go initialisms; `names.tables` wins | `users` → `User`, `user_profiles` → `UserProfile`, `api_keys` → `APIKey`, `people` → `Person`, `dns` → `DNS` |
 | Table → column package | lowercase model name, no underscores | `UserProfile` → `userprofile` |
 | Column → field | PascalCase with initialisms | `user_id` → `UserID`, `avatar_url` → `AvatarURL`, `userIDs` → `UserIDs` |
 | Composite PK → key type | `<Model>Key` struct | `MembershipKey{OrgID, UserID}` |
 | Enum → type | PascalCase of the DB name | `user_role` → `enum.UserRole` |
-| Enum value → constant | `<Type>` + PascalCase of the value | `admin` → `enum.UserRoleAdmin` |
+| Enum value → constant | `<Type>` + PascalCase of the value, without the `X` prefix | `admin` → `enum.UserRoleAdmin`, `1st` → `enum.UserRole1st` |
 
 **PascalCase** splits a name on every rune that is not an ASCII letter or digit and on
 camelCase boundaries (`userName` → `User`·`Name`, `HTTPStatus` → `HTTP`·`Status`), then
 capitalizes each word. Initialisms are upper-cased, and so are their plurals
-(`ids` → `IDs`, `urls` → `URLs`). A result that starts with a digit gets the prefix `X`:
-`2fa_codes` gives the model `X2faCode` and the package `x2facode`, and the enum value
-`1st` of `user_role` gives `UserRoleX1st`. An enum value whose PascalCase form is empty
-(such as `""`) becomes `Empty` (`UserRoleEmpty`).
+(`ids` → `IDs`, `urls` → `URLs`). A model, package, field or enum type name that starts
+with a digit gets the prefix `X`: `2fa_codes` gives the model `X2faCode` and the package
+`x2facode`. An enum value constant follows its type name, so it keeps a leading digit:
+the value `1st` of `user_role` gives `UserRole1st`. An enum value whose PascalCase form
+is empty (such as `""`) becomes `Empty` (`UserRoleEmpty`).
 
 Initialisms follow the Go list `ACL API ASCII CPU CSS DNS EOF GUID HTML HTTP HTTPS ID IP
 JSON LHS QPS RAM RHS RPC SLA SMTP SQL SSH TCP TLS TTL UDP UI UID UUID URI URL UTF8 VM
@@ -301,8 +303,9 @@ XML XMPP XSRF XSS`.
 Singularization applies English suffix rules (`-ies` → `-y`, `-sses`/`-xes`/`-zes`/
 `-ches`/`-shes` → drop `es`, otherwise drop a final `s` but not `ss`), with a list of
 irregular plurals (`people`, `children`, `indices`, `movies`, `statuses`, …) and words
-that stay unchanged (`series`, `news`, `data`, `media`, `status`, `analysis`, …). When it
-guesses wrong, set the model with `names.tables`.
+that stay unchanged (`series`, `news`, `data`, `media`, `status`, `analysis`, …). A last
+word that is itself an initialism is not singularized (`dns` → `DNS`, `https` → `HTTPS`,
+`user_dns` → `UserDNS`). When it guesses wrong, set the model with `names.tables`.
 
 Renames (no error):
 
@@ -310,8 +313,10 @@ Renames (no error):
   `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context` (packages that
   generated files import), or the root package name gets the suffix `tbl`
   (`type` → `typetbl`).
-- A field named `Edges` gets the suffix `Col` (`EdgesCol`), since `Edges` is
-  reserved for eager-loaded relations.
+- A field named `Edges`, `Table`, `Columns` or `As` gets the suffix `Col`
+  (`EdgesCol`, `TableCol`, `ColumnsCol`, `AsCol`). `Edges` is reserved for
+  eager-loaded relations, and each column package declares `const Table`,
+  `type Columns` and `func As` (§7.1).
 
 Generation errors (all of them are reported together, each naming the tables, columns
 or enums involved):
@@ -322,9 +327,11 @@ or enums involved):
   override.
 - A root-package identifier generated twice. The root package reserves `Client`,
   `NewClient` and `Dialect`, and each model reserves itself plus `<Model>Edges`,
-  `<Model>Insert`, `<Model>Update`, `<Model>Query`, `<Model>Repo`, `<Model>Table` and
-  `<Model>Key`. For example, a table `user_queries` (model `UserQuery`) clashes with
-  the query type of `users`.
+  `<Model>Insert`, `<Model>Update`, `<Model>Query`, `<Model>Repo`, `<Model>Table`,
+  `<Model>Key`, `<Model>InsertQuery`, `<Model>UpdateQuery` and `<Model>DeleteQuery`.
+  For example, a table `user_queries` (model `UserQuery`) clashes with the query type
+  of `users`, and a table `user_deletes` (model `UserDelete`) clashes with the delete
+  query type of `users`.
 - Two tables with different models that map to the same package.
 - Two columns of one table that map to the same field (`user_id` and `userId`).
 - Two enums that map to the same type, or an identifier of the enum package generated
