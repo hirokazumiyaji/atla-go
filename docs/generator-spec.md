@@ -1,16 +1,18 @@
 # `atlagen` Code Generator Specification
 
 This document specifies `atlagen`, the Ahead-of-Time code generator that reads
-Atlas schema JSON and emits typed Go models, column descriptors, query builders, and
-a client. It also specifies `atlavet`, the static analyzer that reports missing
+the schema HCL printed by `atlas schema inspect` and emits typed Go models, column
+descriptors, query builders, and a client. It also specifies `atlavet`, the static analyzer that reports missing
 required `INSERT` columns.
 
 Both live in the tooling module `github.com/hirokazumiyaji/atla-go/atlagen`, which
-is separate from the zero-dependency runtime module.
+is separate from the zero-dependency runtime module. The generator has no public Go
+API: its packages live under `atlagen/internal/`. `atlavet` stays outside `internal/`
+so that a golangci-lint plugin can import it.
 
 ---
 
-## 1. CLI & Configuration (`cmd/atlagen`, `config/`, `inspect/`)
+## 1. CLI & Configuration (`cmd/atlagen`, `internal/config`, `internal/inspect`)
 
 ### 1.1 Installation
 
@@ -31,39 +33,63 @@ package dbgen
 
 ```bash
 # 1. stdin (default when --schema is omitted or "-")
-atlas schema inspect -u "postgres://localhost:5432/app?sslmode=disable" --format '{{ json . }}' \
+atlas schema inspect -u "postgres://localhost:5432/app?sslmode=disable" \
   | atlagen generate --dialect postgres --out ./internal/dbgen
 
-# 2. saved Atlas JSON
-atlagen generate --schema ./schema.inspect.json --dialect sqlite --out ./internal/dbgen
+# 2. saved inspect output
+atlas schema inspect -u "sqlite://app.db" > schema.inspect.hcl
+atlagen generate --schema ./schema.inspect.hcl --dialect sqlite --out ./internal/dbgen
 
-# 3. atlagen runs `atlas schema inspect` itself
+# 3. atlagen runs `atlas schema inspect -u <url>` itself
 atlagen generate --schema file://schema.hcl --dev-url docker://postgres/16/dev \
   --dialect postgres --out ./internal/dbgen
 
 # 4. CI: exit status 1 and a unified diff when the generated files are stale
 atlagen check --config atlagen.yaml
 
+# debugging: print the resolved IR (§2) as indented JSON
+atlagen ir --config atlagen.yaml
+
 atlagen version
 ```
+
+| Command | Description |
+| :--- | :--- |
+| `ir` | Runs the front end (load, parse, name, map) with the flags of §1.3 and prints the resolved IR (§2) as indented JSON on stdout. Warnings go to stderr as `atlagen: warning: <msg>`. It writes no files. This is a permanent debugging command. |
+| `version` | Prints `atlagen <module version>`, or `atlagen devel` for a build outside a released module. |
+| `generate` | Writes the generated code (§7, §8). Arrives in P3 together with the emitters. |
+| `check` | Compares the generated code with the files on disk (§8). Arrives in P3. |
+
+**Input format.** `atlagen` reads the HCL that `atlas schema inspect -u <url>` prints
+by default, without `--format`, and parses it with `github.com/hashicorp/hcl/v2`.
+JSON input (anything whose first non-blank character is `{`) is rejected with an error
+that points to the HCL command, because Atlas's JSON output omits defaults, identity
+columns, Postgres enums and partial-index predicates.
+
+**Exit status.** `0` on success. `2` on a usage error: no command, an unknown command,
+an unknown flag or a flag that fails to parse, positional arguments, or `-h` (each
+prints the usage text to stderr). `1` on every other error, including invalid option
+values and every config, input, parse, naming and mapping error; the error is printed
+to stderr as `atlagen: <err>`.
 
 ### 1.3 Flags
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
-| `--config` | `./atlagen.yaml` if present | Config file. Flags override config values. |
-| `--schema`, `-s` | `-` | `-` (stdin), path to Atlas JSON, or an Atlas URL (`file://`, `postgres://`, `sqlite://`, …). For a URL, `atlas` must be on `PATH`. |
-| `--dev-url` | — | Passed to `atlas schema inspect --dev-url`. |
-| `--dialect` | required | `postgres`, `sqlite` (later: `mysql`, `tidb`). |
-| `--schema-name` | first schema | Schema to generate when the JSON contains several. |
-| `--out`, `-o` | required | Output directory. |
-| `--package` | base name of `--out` | Go package name of the root generated package. |
-| `--nullable` | `pointer` | Model field style for nullable columns: `pointer` (`*T`) or `sqlnull` (`sql.Null[T]`). |
+| `--config` | `./atlagen.yaml` if present | Config file. A flag given on the command line overrides the config value, even when the flag's value is empty. |
+| `--schema`, `-s` | `-` | `-` (stdin), path to a file holding `atlas schema inspect` HCL, or an Atlas URL (anything containing `://`: `file://`, `postgres://`, `sqlite://`, …). For a URL, `atlagen` runs `atlas schema inspect -u <url>`, and `atlas` must be on `PATH`. |
+| `--dev-url` | — | Passed to `atlas schema inspect --dev-url`. Requires `--schema` to be an Atlas URL; with stdin or a file it is an error. |
+| `--dialect` | required | `postgres` or `sqlite`. `mysql` and `tidb` fail with `dialect "mysql" is not supported yet` (later phase); any other value is an unknown dialect. |
+| `--schema-name` | the only schema, else `public`, else `main` | Schema to use when the input has several. When the input has several schemas and none is `public` or `main`, it is required. |
+| `--out`, `-o` | required | Output directory. It must be inside a Go module (see below). |
+| `--package` | base name of `--out` | Go package name of the root generated package: a lowercase identifier (`[a-z][a-z0-9_]*`) that is not a Go keyword. When the base name of `--out` is not such a name, `--package` is required. |
+| `--nullable` | `pointer` | Model field style for nullable columns: `pointer` (`*T`) or `sqlnull` (`sql.Null[T]`). Any other value is an error. |
 | `--json-tags` | `true` | Emit `json:"<column_name>"` tags on model fields. |
 
 The output package's **import path** is derived by walking up from `--out` to the
-nearest `go.mod` and joining the module path with the relative directory. Generated
-table subpackages import `<import path>/enum`.
+nearest `go.mod` and joining the module path with the relative directory. `--out` need
+not exist yet. No `go.mod` at or above it, or one that cannot be read, is an error.
+Generated table subpackages import `<import path>/enum`.
 
 ### 1.4 `atlagen.yaml`
 
@@ -100,9 +126,26 @@ names:                     # identifier overrides
 The YAML parser is `go.yaml.in/yaml/v3`, the maintained fork of `gopkg.in/yaml.v3`.
 It is a dependency of the tooling module only.
 
+- **Discovery.** The config file is `--config <file>` when given (relative to the
+  current directory), else `atlagen.yaml` in the current directory when it exists,
+  else none.
+- **Validation.** Unknown keys are errors, `version: 1` is required, and every entry
+  needs its required fields (`db_type` and `go_type`; `column` and `go_type`; `fk` and
+  `name`). The override values are checked by the naming and mapping stages (§3, §4.5).
+- **Relative paths.** Values from `atlagen.yaml` (a schema file path, a relative
+  `file://` URL, `out`) resolve against the config file's directory, and the `atlas`
+  subprocess runs with that directory as its working directory. Values from flags
+  resolve against the current working directory, which is then also the working
+  directory of `atlas`.
+- **`dev_url`** requires `schema` to be an Atlas URL, like `--dev-url`.
+- **`names.tables`** keys must name a table of the selected schema; an unused key is an
+  error. Values must be exported Go identifiers.
+- **`names.edges`** entries are checked for shape only. Edges are derived in P4 (§5),
+  which applies them.
+
 ---
 
-## 2. Internal Representation (`ir/`)
+## 2. Internal Representation (`internal/ir`)
 
 ```go
 package ir
@@ -111,93 +154,184 @@ type Schema struct {
     Name    string
     Dialect string
     Enums   []Enum
-    Tables  []Table   // sorted by Name for deterministic output
+    Tables  []Table      // sorted by DBName
 }
 
 type Enum struct {
-    DBName string     // "user_role", or "<table>_<column>" for MySQL inline enums
-    GoName string     // "UserRole"
-    Values []EnumValue
+    DBName string        // "user_role"
+    GoName string        // "UserRole"
+    Values []EnumValue   // Atlas order
 }
 
 type EnumValue struct {
-    DB string         // "admin"
-    Go string         // "UserRoleAdmin"
+    DB string            // "admin"
+    Go string            // "UserRoleAdmin"
 }
 
 type Table struct {
-    DBName      string    // "users"
-    Model       string    // "User"
-    Package     string    // "user" (column subpackage)
-    Columns     []Column  // Atlas order
-    PrimaryKey  []string  // column DB names, may be empty or composite
-    Uniques     [][]string
+    DBName      string       // "users"
+    Model       string       // "User"
+    Package     string       // "user" (column subpackage)
+    Columns     []Column     // Atlas order
+    PrimaryKey  []string     // column DB names; may be empty or composite
+    Uniques     [][]string   // plain-column unique indexes, index order
     ForeignKeys []ForeignKey
-    Edges       []Edge    // derived (§5)
 }
 
 type Column struct {
-    DBName      string    // "created_at"
-    GoName      string    // "CreatedAt"
-    RawType     string    // "timestamp with time zone"
-    GoType      GoType    // resolved by mapper
-    ColumnKind  string    // "Column" | "NumberColumn" | "StringColumn", prefixed with "Null" when Nullable
-    Nullable    bool
-    HasDefault  bool      // DEFAULT, identity, serial, AUTO_INCREMENT, rowid alias
-    InPK        bool
-    Scan        ScanPlan  // how the generated scanner reads this column (§4.4)
+    DBName     string      // "created_at"
+    GoName     string      // "CreatedAt"
+    RawType    string      // "timestamptz", "character varying(255)"
+    Enum       string      // DB name of the schema enum this column uses, or ""
+    GoType     GoType      // resolved by the mapper
+    Kind       ColumnKind  // "Column" | "NumberColumn" | "StringColumn", prefixed with "Null" when Nullable
+    Nullable   bool
+    HasDefault bool        // DEFAULT, identity, serial, AUTO_INCREMENT, rowid alias
+    Generated  bool        // generated (computed) column; never written
+    InPK       bool
+    Scan       ScanPlan    // how the generated scanner reads this column (§4.4)
 }
 
 type GoType struct {
-    Name       string     // "time.Time", "int64", "enum.UserRole", "uuid.UUID"
-    ImportPath string     // "time", "", "<pkg>/enum", "github.com/google/uuid"
+    Name       string      // "time.Time", "int64", "enum.UserRole", "uuid.UUID"
+    ImportPath string      // "time", "", "<pkg>/enum", "github.com/google/uuid"
 }
+
+type ColumnKind string     // KindColumn, KindNumber, KindString, KindNullColumn, KindNullNumber, KindNullString
+type ScanPlan string       // ScanDirect, ScanWiden, ScanNullPtr, ScanNullWiden
 
 type ForeignKey struct {
-    Symbol     string
-    Columns    []string
-    RefTable   string
-    RefColumns []string
+    Symbol      string
+    Columns     []string
+    RefSchema   string     // "" for the selected schema, else the referenced table's schema
+    RefTable    string
+    RefColumns  []string
+    RefExternal bool       // the referenced table is not in the inspected document
 }
 
-type Edge struct {
-    Name     string       // "Posts", "Author"
-    Kind     EdgeKind     // O2M | M2O | O2O
-    FK       ForeignKey
-    Target   string       // target table DB name
-    Inverse  string       // name of the edge on the other side
-}
+func (c Column) RequiredForInsert() bool       // !Nullable && !HasDefault && !Generated
+func (t Table) Column(dbName string) (Column, bool)
 ```
 
-**Required for insert** = `!Nullable && !HasDefault`. The parser sets `HasDefault`
-when Atlas reports `default`, `identity`, `auto_increment`, a `serial`-family type,
-or (SQLite) an `INTEGER PRIMARY KEY` rowid alias.
+Every field has a snake_case JSON tag (`db_name`, `go_type`, `has_default`,
+`ref_external`, …), which is the format `atlagen ir` prints. Slices are never nil, so
+they print as `[]`, not `null`. The same input always produces byte-identical IR JSON.
+
+The IR has no edge type. Edges are derived from `ForeignKeys` in P4 (§5).
+
+**Required for insert** = `!Nullable && !HasDefault && !Generated`. A generated column
+can never be written, so P3 omits it from `XxxInsert` and `XxxUpdate`.
+
+### 2.1 Parsing Atlas HCL (`internal/parser`)
+
+The parser fills the database facts; the Go names and Go types are filled by the
+naming (§3) and mapping (§4) stages.
+
+- **Schema selection.** `--schema-name` selects a schema by name; a name the input does
+  not hold is an error that lists the available schemas. Without a name, the parser
+  picks the only schema, else `public`, else `main`. Any other set of schemas is an
+  error that asks for `schema_name`. Only tables and enums of the selected schema enter
+  the IR, and a selected schema without tables is an error.
+- **Raw types** are the type as Atlas prints it. In an identifier, `_` is turned back
+  into a space (`character_varying(255)` → `character varying(255)`); `sql("<t>")` gives
+  `<t>` verbatim. Atlas prints SQLite types in lowercase (`integer`, `numeric(10,2)`),
+  except for declared types it has no spec for, such as `sql("FOO")`, which keep their
+  case. Postgres interval types that Atlas prints by their field alone (`day_to_second`)
+  get the `interval` keyword back. A column of a schema enum (`enum.user_role`) gets
+  `RawType` and `Enum` set to the enum name. A column of an enum from another schema
+  gets `RawType` `<schema>.<name>` and no `Enum`, so it needs an override (§4.5).
+- **Nullable** is `null = true`. Primary-key columns are never nullable, even when Atlas
+  prints `null = true` (SQLite does for some keys).
+- **HasDefault** is set when the column has a `default`, an `identity` block,
+  `auto_increment = true`, a `serial`-family type (`serial`, `serial2`, `serial4`,
+  `serial8`, `smallserial`, `bigserial`), or (SQLite) is the single-column
+  `INTEGER PRIMARY KEY`, an alias of the rowid.
+- **Generated** is set by an `as { expr = "…" }` block (what Atlas prints) or an
+  `as = "…"` attribute.
+- **Uniques** come from Postgres `unique "<name>" {}` blocks (Atlas prints UNIQUE
+  constraints this way) and from `index` blocks with `unique = true`, in file order.
+  Only indexes whose parts are all plain columns and that have no `where` predicate
+  count. Expression and partial indexes are excluded, because they cannot prove an O2O
+  edge.
+- **Foreign keys** locate the referenced table with `RefSchema` and `RefExternal`:
+  - `RefSchema ""`, `RefExternal false`: the table is in the selected schema.
+  - `RefSchema "<s>"`: the table is in schema `<s>` of the inspected document (a
+    realm-wide inspect). P4 skips such FKs with a warning.
+  - `RefExternal true` (with `RefSchema ""`): the table is not in the inspected
+    document. A single-schema inspect prints an FK into a schema that was not inspected
+    (for example Supabase's `public.profiles` → `auth.users`) as an unqualified
+    reference to a table that does not appear. P4 skips such FKs with a warning.
+
+  Limitation: when the selected schema also has a table with the name of such an
+  external target, the unqualified reference cannot be told apart from a same-schema
+  reference, and it resolves to the selected schema. Inspect every schema involved (a
+  realm-wide URL) to avoid this.
+- **Order.** Tables are sorted by DB name. Columns, enum values, primary-key columns and
+  FK columns keep Atlas order; uniques keep index order.
+- **Errors** carry their context (`table "users": column "age": …`): HCL syntax errors
+  (`invalid atlas hcl: schema.hcl:<line>:<col>: …`), duplicate tables, enums or columns,
+  key or index parts naming unknown columns, unsupported type expressions, and unknown
+  enums.
 
 ---
 
-## 3. Naming Rules (`naming/`)
+## 3. Naming Rules (`internal/naming`)
 
 | Input | Rule | Example |
 | :--- | :--- | :--- |
-| Table → model | singularize, then PascalCase with Go initialisms | `users` → `User`, `user_profiles` → `UserProfile`, `api_keys` → `APIKey` |
+| Table → model | singularize the last word, then PascalCase with Go initialisms; `names.tables` wins | `users` → `User`, `user_profiles` → `UserProfile`, `api_keys` → `APIKey`, `people` → `Person` |
 | Table → column package | lowercase model name, no underscores | `UserProfile` → `userprofile` |
-| Column → field | PascalCase with initialisms | `user_id` → `UserID`, `avatar_url` → `AvatarURL` |
+| Column → field | PascalCase with initialisms | `user_id` → `UserID`, `avatar_url` → `AvatarURL`, `userIDs` → `UserIDs` |
 | Composite PK → key type | `<Model>Key` struct | `MembershipKey{OrgID, UserID}` |
-| Enum → type | PascalCase of the DB name | `user_role` → `enum.UserRole`, values `enum.UserRoleAdmin` |
+| Enum → type | PascalCase of the DB name | `user_role` → `enum.UserRole` |
+| Enum value → constant | `<Type>` + PascalCase of the value | `admin` → `enum.UserRoleAdmin` |
+
+**PascalCase** splits a name on every rune that is not an ASCII letter or digit and on
+camelCase boundaries (`userName` → `User`·`Name`, `HTTPStatus` → `HTTP`·`Status`), then
+capitalizes each word. Initialisms are upper-cased, and so are their plurals
+(`ids` → `IDs`, `urls` → `URLs`). A result that starts with a digit gets the prefix `X`:
+`2fa_codes` gives the model `X2faCode` and the package `x2facode`, and the enum value
+`1st` of `user_role` gives `UserRoleX1st`. An enum value whose PascalCase form is empty
+(such as `""`) becomes `Empty` (`UserRoleEmpty`).
 
 Initialisms follow the Go list `ACL API ASCII CPU CSS DNS EOF GUID HTML HTTP HTTPS ID IP
 JSON LHS QPS RAM RHS RPC SLA SMTP SQL SSH TCP TLS TTL UDP UI UID UUID URI URL UTF8 VM
 XML XMPP XSRF XSS`.
 
-Collisions:
+Singularization applies English suffix rules (`-ies` → `-y`, `-sses`/`-xes`/`-zes`/
+`-ches`/`-shes` → drop `es`, otherwise drop a final `s` but not `ss`), with a list of
+irregular plurals (`people`, `children`, `indices`, `movies`, `statuses`, …) and words
+that stay unchanged (`series`, `news`, `data`, `media`, `status`, `analysis`, …). When it
+guesses wrong, set the model with `names.tables`.
 
-- A package name that is a Go keyword or predeclared identifier, or that equals
-  `atla`, `enum`, `sql`, `time`, or the root package name, gets the suffix `tbl`
+Renames (no error):
+
+- A package name that is a Go keyword or predeclared identifier, one of `atla`,
+  `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context` (packages that
+  generated files import), or the root package name gets the suffix `tbl`
   (`type` → `typetbl`).
 - A field named `Edges` gets the suffix `Col` (`EdgesCol`), since `Edges` is
   reserved for eager-loaded relations.
-- Two tables that map to the same model name are a generation error. The error
-  suggests a `names.tables` override.
+
+Generation errors (all of them are reported together, each naming the tables, columns
+or enums involved):
+
+- A table, column or enum name with no ASCII letters or digits, from which no
+  identifier can be derived. For a table, the error suggests `names.tables`.
+- Two tables that map to the same model name. The error suggests a `names.tables`
+  override.
+- A root-package identifier generated twice. The root package reserves `Client`,
+  `NewClient` and `Dialect`, and each model reserves itself plus `<Model>Edges`,
+  `<Model>Insert`, `<Model>Update`, `<Model>Query`, `<Model>Repo`, `<Model>Table` and
+  `<Model>Key`. For example, a table `user_queries` (model `UserQuery`) clashes with
+  the query type of `users`.
+- Two tables with different models that map to the same package.
+- Two columns of one table that map to the same field (`user_id` and `userId`).
+- Two enums that map to the same type, or an identifier of the enum package generated
+  twice: the enum types, their `<Type>Values` functions and the value constants (an
+  enum value `values` of `user_role` clashes with `UserRoleValues`).
+- A `names.tables` key that matches no table, or a value that is not an exported Go
+  identifier.
 
 The name of a generated variable such as `user` (package) can collide with a local
 variable named `user`. This is the same trade-off ent makes, and it is documented
@@ -205,30 +339,38 @@ rather than worked around.
 
 ---
 
-## 4. Type Mapping (`mapper/`)
+## 4. Type Mapping (`internal/mapper`)
 
 The *Column kind* columns below are for NOT NULL columns. A nullable column uses the
 `Null` variant of the same kind (`NullNumberColumn[int32]`, `NullStringColumn[string]`,
 `NullColumn[time.Time]`), see `runtime-spec.md` §2.2.
 
-Type strings are normalized before lookup: lowercased, length/precision removed,
-`unsigned` recorded separately, and time-zone clauses folded. The mapping assumes the
-recommended drivers (`pgx/v5/stdlib` and `modernc.org/sqlite`). Other drivers may
-need `types:` overrides.
+Each column resolves in this order: a `columns:` override, a `types:` override, the
+schema enum, then the dialect table (§4.5 for overrides).
+
+Type strings are normalized before lookup: lowercased, whitespace collapsed,
+length/precision arguments removed, time-zone clauses folded
+(`timestamp with time zone` → `timestamptz`, `time without time zone` → `time`),
+interval fields dropped (`interval hour` → `interval`), array dimensions reduced to one
+`[]` suffix, and an `unsigned` modifier dropped (it matters only for MySQL). For
+Postgres, synonyms are then folded onto the names in §4.1 (`int4` → `integer`,
+`character varying` → `varchar`, `bpchar` → `char`, `serial4` → `serial`, …). The
+mapping assumes the recommended drivers (`pgx/v5/stdlib` and `modernc.org/sqlite`).
+Other drivers may need `types:` overrides.
 
 ### 4.1 PostgreSQL
 
 | SQL type | Go type | Column kind |
 | :--- | :--- | :--- |
-| `smallint`, `int2`, `smallserial` | `int16` | `NumberColumn[int16]` |
-| `integer`, `int`, `int4`, `serial` | `int32` | `NumberColumn[int32]` |
-| `bigint`, `int8`, `bigserial` | `int64` | `NumberColumn[int64]` |
+| `smallint`, `int2`, `smallserial`, `serial2` | `int16` | `NumberColumn[int16]` |
+| `integer`, `int`, `int4`, `serial`, `serial4` | `int32` | `NumberColumn[int32]` |
+| `bigint`, `int8`, `bigserial`, `serial8` | `int64` | `NumberColumn[int64]` |
 | `real`, `float4` | `float32` | `NumberColumn[float32]` |
 | `double precision`, `float8` | `float64` | `NumberColumn[float64]` |
 | `numeric`, `decimal` | `string` (override recommended) | `Column[string]` |
 | `money` | `string` | `Column[string]` |
-| `boolean` | `bool` | `Column[bool]` |
-| `text`, `varchar`, `char`, `citext` | `string` | `StringColumn[string]` |
+| `boolean`, `bool` | `bool` | `Column[bool]` |
+| `text`, `varchar` (`character varying`), `char` (`character`, `bpchar`), `citext` | `string` | `StringColumn[string]` |
 | `inet`, `cidr`, `macaddr` | `string` | `StringColumn[string]` |
 | `bytea` | `[]byte` | `Column[[]byte]` |
 | `uuid` | `string` (override to `uuid.UUID` recommended) | `Column[string]` |
@@ -237,6 +379,7 @@ need `types:` overrides.
 | `json`, `jsonb` | `json.RawMessage` | `Column[json.RawMessage]` |
 | user enum | `enum.<Name>` | `StringColumn[enum.<Name>]` |
 | `<type>[]` | **v1: generation error unless overridden** | — |
+| anything else | **generation error unless overridden** | — |
 
 Arrays are excluded from v1 because `database/sql` exposes them only as text through
 pgx/stdlib. A correct mapping needs `pgtype` scanners, which would make generated
@@ -255,7 +398,13 @@ code depend on pgx. A later phase may add an opt-in `pgx` codec package.
 | `date`, `datetime`, `timestamp` | `time.Time` | `Column[time.Time]` |
 | `uuid` | `string` | `Column[string]` |
 | `json` | `json.RawMessage` | `Column[json.RawMessage]` |
-| anything else | `string`, with a generation warning | `Column[string]` |
+
+A type that is not in the table goes through SQLite's affinity rules, in this order:
+contains `int` → `int64`; contains `char`, `clob` or `text` → `string`
+(`StringColumn`); contains `blob` → `[]byte`; contains `real`, `floa` or `doub` →
+`float64`. Only a type that matches neither the table nor a rule (`FOO`) maps to
+`string` (`Column[string]`) with a generation warning. For example, `mediumint` maps to
+`int64` and `varying character(20)` to `string`.
 
 ### 4.3 MySQL / TiDB (later phase)
 
@@ -273,20 +422,48 @@ use); `json` → `json.RawMessage`; inline `enum('a','b')` → `enum.<Table><Col
 | NOT NULL, has default | `T` | `T` | `atla.Opt[T]` | `atla.Opt[T]` |
 | nullable | `*T` | `sql.Null[T]` | `atla.Opt[*T]` | `atla.Opt[*T]` |
 | PK column | as above | as above | as above | *(not present)* |
+| generated column | as above | as above | *(not present)* | *(not present)* |
 
 The **scan plan** is the Go counterpart of atla's `row_codec`. It is chosen per
 column so that the generated scanner avoids slow `database/sql` conversion paths:
 
 | Plan | When | Generated code |
 | :--- | :--- | :--- |
-| `direct` | Go type matches the driver value (`int64`, `float64`, `string`, `[]byte`, `bool`, `time.Time`, `sql.Scanner` types such as enums and overrides) | `&u.Field` |
-| `widen` | `int16`/`int32`/`float32` (`database/sql` would otherwise go through `strconv`) | scan into an `int64`/`float64` local, then convert |
-| `nullptr` | nullable with `--nullable=pointer` | scan into `sql.Null[T]` local; `if n.Valid { v := n.V; u.Field = &v }` (allocates only for non-NULL) |
-| `nullwiden` | combination of the two above | `sql.Null[int64]` local, then convert and take the address |
+| `direct` | NOT NULL and not a widen type: the Go type matches the driver value (`int64`, `float64`, `string`, `[]byte`, `bool`, `time.Time`, `sql.Scanner` types such as enums and non-builtin overrides). Also a nullable non-widen column with `--nullable=sqlnull`, whose field is a `sql.Null[T]`. | `&u.Field` |
+| `widen` | NOT NULL with a widen type: every builtin integer or float type except `int64` and `float64` (`int16`, `int32`, `float32`, and override types such as `int` or `uint8`). `database/sql` would otherwise go through `strconv`. | scan into an `int64`/`float64` local, then convert |
+| `nullptr` | nullable with `--nullable=pointer`, not a widen type | scan into `sql.Null[T]` local; `if n.Valid { v := n.V; u.Field = &v }` (allocates only for non-NULL) |
+| `nullwiden` | nullable with a widen type, with either `--nullable` style | `sql.Null[int64]` local, then convert and take the address |
 
 Generated enum types implement `sql.Scanner` and `driver.Valuer`. The scanner
 rejects values outside the enum with an error, so enum columns take the `direct`
 plan without reflection.
+
+### 4.5 Overrides (`types:`, `columns:`)
+
+- **`types:`** maps every column of a database type. `db_type` is matched after the
+  normalization above, applied to both sides, so length arguments are ignored and
+  Postgres synonyms match each other: `db_type: varchar` matches
+  `character varying(255)`, and `db_type: int4` matches `integer`. Serial types are not
+  folded into integer types: `db_type: integer` does not match a `serial` column, nor
+  `bigint` a `bigserial` column. An override whose type no column has produces a
+  warning. Two overrides for the same normalized type are an error.
+- **`columns:`** maps one column, written `table.column`, and wins over `types:`. A
+  malformed key, a column that does not exist, or two overrides for one column are
+  errors.
+- **`go_type`** is a builtin (`string`, `bool`, `[]byte`, `int`, `int8` … `int64`,
+  `uint` … `uint64`, `uintptr`, `byte`, `rune`, `float32`, `float64`), which needs no
+  import, or `<import path>.<Type>`, split at the last `.` after the last `/`:
+  `github.com/google/uuid.UUID` gives import `github.com/google/uuid` and type
+  `uuid.UUID`, and `time.Duration` gives import `time` and type `time.Duration`. The
+  qualifier is the last path element, skipping a `/vN` major-version element and a
+  gopkg.in `.vN` suffix (`github.com/foo/bar/v2.Thing` → `bar.Thing`). The type name
+  must be exported, and the qualifier must be a Go identifier.
+- **Kind.** A builtin integer or float type gives `NumberColumn`, `string` gives
+  `StringColumn`, anything else gives `Column` (the `Null` variants for nullable
+  columns).
+- **Scan plan.** Builtins follow §4.4. Non-builtin types are never widened: they are
+  assumed to implement `sql.Scanner` and take `direct` (or `nullptr` when nullable with
+  `--nullable=pointer`). P3 validates them with `go/types` (§8).
 
 ---
 
@@ -318,7 +495,8 @@ Composite FKs (`(org_id, user_id) REFERENCES memberships (org_id, user_id)`) are
 supported. The generator emits a comparable key struct for grouping and uses
 row-value `IN` in the loader.
 
-Cross-schema FKs are skipped with a warning in v1. Many-to-many edges through join
+Cross-schema FKs (`RefSchema` set) and FKs into a table outside the inspected document
+(`RefExternal`, §2.1) are skipped with a warning in v1. Many-to-many edges through join
 tables are a later phase (see `runtime-spec.md` §11).
 
 ---
@@ -626,6 +804,9 @@ func (v UserRole) Value() (driver.Value, error) // rejects unknown values
 
 ## 8. Generation Behaviour
 
+`generate` and `check` arrive in P3. The validation below runs in every command that
+resolves a schema, including `atlagen ir`.
+
 - **Stale files**: `generate` deletes files in `--out` (and in its generated
   subpackages) that carry the generated header but are no longer produced. It never
   touches files without the header. Handwritten files can therefore live next to
@@ -635,7 +816,19 @@ func (v UserRole) Value() (driver.Value, error) // rejects unknown values
 - **Tables without a PK**: no `Get` / `GetMany` / `DeleteByPK` / `NewNullableRowScanner`;
   everything else works.
 - **Views**: ignored in v1 (my call). Read-only view models are a later candidate.
-- **Validation errors** (generation fails with a precise message): unknown dialect,
-  unmapped type without override, name collision, array column without override,
-  and an override type that does not implement `sql.Scanner` and `driver.Valuer`
-  (checked with `go/types` when `go_type` is outside the standard library).
+- **Validation errors** (generation fails with a precise message and exit status 1):
+  - options: a missing, unknown or unsupported (`mysql`, `tidb`) dialect, a missing
+    `out`, an invalid `nullable` or package name, `dev_url` / `--dev-url` without an
+    Atlas URL in `schema` / `--schema`, no `go.mod` at or above `out`, and an invalid
+    config file (§1.4);
+  - input: JSON instead of HCL, invalid HCL, an ambiguous or unknown schema, a
+    selected schema without tables, and the other parse errors of §2.1;
+  - naming: every collision and invalid `names.tables` entry of §3;
+  - mapping: an unmapped Postgres type or array column without an override, a
+    `columns:` override naming an unknown `table.column`, an invalid `go_type`, and
+    duplicate overrides (§4.5);
+  - P3: an override type that does not implement `sql.Scanner` and `driver.Valuer`
+    (checked with `go/types` when `go_type` is outside the standard library).
+- **Warnings** (printed to stderr as `atlagen: warning: <msg>`; generation continues):
+  an unknown SQLite type mapped to `string` (§4.2), and a `types:` override whose type
+  no column has (§4.5).
