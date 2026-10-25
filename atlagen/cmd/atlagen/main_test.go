@@ -211,3 +211,27 @@ func TestCLIDeterministic(t *testing.T) {
 		t.Errorf("outputs differ (exit %d)", a.code)
 	}
 }
+
+func TestCLIJoinedErrors(t *testing.T) {
+	table := func(name string) string {
+		return "table \"" + name + "\" {\n  schema = schema.main\n  column \"id\" {\n    null = false\n    type = integer\n  }\n}\n"
+	}
+	// Two naming clashes: user/users share a model, client is reserved.
+	hcl := table("client") + table("user") + table("users") + "schema \"main\" {\n}\n"
+	got := runCLI(t, moduleDir(t), hcl, "ir", "--dialect", "sqlite", "-o", "internal/dbgen")
+	if got.code != 1 || got.stdout != "" {
+		t.Fatalf("exit %d, stdout %q, want exit 1 and no output", got.code, got.stdout)
+	}
+	lines := strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stderr has %d lines, want 2:\n%s", len(lines), got.stderr)
+	}
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "atlagen: ") {
+			t.Errorf("line %q does not start with %q", l, "atlagen: ")
+		}
+	}
+	if !strings.Contains(lines[0], `"User"`) || !strings.Contains(lines[1], `"Client"`) {
+		t.Errorf("stderr = %q, want the User then the Client clash", got.stderr)
+	}
+}

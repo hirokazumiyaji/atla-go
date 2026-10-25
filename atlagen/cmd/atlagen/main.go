@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
+	"syscall"
 
 	"github.com/hirokazumiyaji/atla-go/atlagen/internal/config"
 	"github.com/hirokazumiyaji/atla-go/atlagen/internal/pipeline"
@@ -52,7 +54,7 @@ Prints the atlagen version.
 var errUsage = errors.New("usage error")
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := 1
 	if cwd, err := os.Getwd(); err != nil {
 		fmt.Fprintf(os.Stderr, "atlagen: %v\n", err)
@@ -86,7 +88,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case errors.Is(err, errUsage):
 		return 2
 	default:
-		printTo(stderr, "atlagen: %v\n", err)
+		// Joined errors (naming, mapper) span several lines; prefix each.
+		for _, line := range strings.Split(err.Error(), "\n") {
+			printTo(stderr, "atlagen: %s\n", line)
+		}
 		return 1
 	}
 }

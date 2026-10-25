@@ -300,7 +300,7 @@ func TestResolveRelativeToConfigDir(t *testing.T) {
 	}
 
 	t.Run("schema file and out", func(t *testing.T) {
-		repo, cwd := setup(t, "version: 1\ndialect: postgres\nout: internal/dbgen\nschema: db/schema.json\n")
+		repo, cwd := setup(t, "version: 1\ndialect: postgres\nout: internal/dbgen\nschema: db/schema.hcl\n")
 		got, err := Resolve(cwd, Flags{Config: str("../../atlagen.yaml")})
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
@@ -308,7 +308,7 @@ func TestResolveRelativeToConfigDir(t *testing.T) {
 		if want := filepath.Join(repo, "internal", "dbgen"); got.OutDir != want {
 			t.Errorf("OutDir = %q, want %q", got.OutDir, want)
 		}
-		if want := filepath.Join(repo, "db", "schema.json"); got.Schema != want {
+		if want := filepath.Join(repo, "db", "schema.hcl"); got.Schema != want {
 			t.Errorf("Schema = %q, want %q", got.Schema, want)
 		}
 		if got.BaseDir != repo {
@@ -334,7 +334,7 @@ func TestResolveRelativeToConfigDir(t *testing.T) {
 	})
 
 	t.Run("flags resolve against cwd", func(t *testing.T) {
-		_, cwd := setup(t, "version: 1\ndialect: postgres\nout: internal/dbgen\nschema: db/schema.json\n")
+		_, cwd := setup(t, "version: 1\ndialect: postgres\nout: internal/dbgen\nschema: db/schema.hcl\n")
 		got, err := Resolve(cwd, Flags{
 			Config: str("../../atlagen.yaml"),
 			Out:    str("./x"),
