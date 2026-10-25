@@ -1,0 +1,195 @@
+{
+  "name": "public",
+  "dialect": "postgres",
+  "enums": [
+    {
+      "db_name": "user_role",
+      "go_name": "UserRole",
+      "values": [
+        {
+          "db": "admin",
+          "go": "UserRoleAdmin"
+        },
+        {
+          "db": "member",
+          "go": "UserRoleMember"
+        },
+        {
+          "db": "guest",
+          "go": "UserRoleGuest"
+        }
+      ]
+    }
+  ],
+  "tables": [
+    {
+      "db_name": "posts",
+      "model": "Post",
+      "package": "post",
+      "columns": [
+        {
+          "db_name": "id",
+          "go_name": "ID",
+          "raw_type": "bigint",
+          "enum": "",
+          "go_type": {
+            "name": "int64",
+            "import_path": ""
+          },
+          "kind": "NumberColumn",
+          "nullable": false,
+          "has_default": true,
+          "generated": false,
+          "in_pk": true,
+          "scan": "direct"
+        },
+        {
+          "db_name": "user_id",
+          "go_name": "UserID",
+          "raw_type": "bigint",
+          "enum": "",
+          "go_type": {
+            "name": "int64",
+            "import_path": ""
+          },
+          "kind": "NumberColumn",
+          "nullable": false,
+          "has_default": false,
+          "generated": false,
+          "in_pk": false,
+          "scan": "direct"
+        },
+        {
+          "db_name": "title",
+          "go_name": "Title",
+          "raw_type": "text",
+          "enum": "",
+          "go_type": {
+            "name": "string",
+            "import_path": ""
+          },
+          "kind": "StringColumn",
+          "nullable": false,
+          "has_default": false,
+          "generated": false,
+          "in_pk": false,
+          "scan": "direct"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "uniques": [],
+      "foreign_keys": [
+        {
+          "symbol": "posts_user_id_fkey",
+          "columns": [
+            "user_id"
+          ],
+          "ref_schema": "",
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "ref_external": false
+        }
+      ]
+    },
+    {
+      "db_name": "users",
+      "model": "User",
+      "package": "user",
+      "columns": [
+        {
+          "db_name": "id",
+          "go_name": "ID",
+          "raw_type": "bigserial",
+          "enum": "",
+          "go_type": {
+            "name": "int64",
+            "import_path": ""
+          },
+          "kind": "NumberColumn",
+          "nullable": false,
+          "has_default": true,
+          "generated": false,
+          "in_pk": true,
+          "scan": "direct"
+        },
+        {
+          "db_name": "email",
+          "go_name": "Email",
+          "raw_type": "character varying(255)",
+          "enum": "",
+          "go_type": {
+            "name": "string",
+            "import_path": ""
+          },
+          "kind": "StringColumn",
+          "nullable": false,
+          "has_default": false,
+          "generated": false,
+          "in_pk": false,
+          "scan": "direct"
+        },
+        {
+          "db_name": "role",
+          "go_name": "Role",
+          "raw_type": "user_role",
+          "enum": "user_role",
+          "go_type": {
+            "name": "enum.UserRole",
+            "import_path": "example.com/app/internal/dbgen/enum"
+          },
+          "kind": "StringColumn",
+          "nullable": false,
+          "has_default": true,
+          "generated": false,
+          "in_pk": false,
+          "scan": "direct"
+        },
+        {
+          "db_name": "from",
+          "go_name": "From",
+          "raw_type": "text",
+          "enum": "",
+          "go_type": {
+            "name": "string",
+            "import_path": ""
+          },
+          "kind": "NullStringColumn",
+          "nullable": true,
+          "has_default": false,
+          "generated": false,
+          "in_pk": false,
+          "scan": "nullptr"
+        },
+        {
+          "db_name": "created_at",
+          "go_name": "CreatedAt",
+          "raw_type": "timestamptz",
+          "enum": "",
+          "go_type": {
+            "name": "time.Time",
+            "import_path": "time"
+          },
+          "kind": "Column",
+          "nullable": false,
+          "has_default": true,
+          "generated": false,
+          "in_pk": false,
+          "scan": "direct"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "uniques": [
+        [
+          "email"
+        ]
+      ],
+      "foreign_keys": []
+    }
+  ]
+}
