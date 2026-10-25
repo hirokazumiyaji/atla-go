@@ -38,7 +38,11 @@ CREATE TABLE things(
   extra FOO
 );
 CREATE TABLE pairs(a INTEGER NOT NULL, b INTEGER NOT NULL, PRIMARY KEY(a, b));
-CREATE TABLE codes(id BIGINT NOT NULL PRIMARY KEY, label TEXT NOT NULL);
+CREATE TABLE codes(
+  id BIGINT NOT NULL PRIMARY KEY,
+  label TEXT NOT NULL,
+  label_upper TEXT NOT NULL GENERATED ALWAYS AS (upper(label)) STORED
+);
 ```
 
 ## Postgres and MySQL: Atlas's own marshaller, hand-built input
@@ -64,7 +68,7 @@ The shapes used are what the inspectors produce:
 | :--- | :--- |
 | `postgres_users.hcl` | enum `user_role`, defaults (`"member"`, `sql("now()")`), `bigserial`, identity, a `unique` constraint, a FK |
 | `typecheck_users.hcl` | a NOT NULL column without default, a unique index |
-| `composite.hcl` | composite PK and FK, a plain unique index, an expression index (`on { expr }`), a partial index (`where`), a non-unique index |
+| `composite.hcl` | composite PK and FK, a plain unique index, an expression index (`on { expr }`), a partial index (`where`), a non-unique index, a generated column (`as { expr … }`) |
 | `pg_types.hcl` | one column per Postgres type of generator-spec §4.1, plus `text[]`, an enum column and a nullable `integer` |
 | `multi_schema.hcl` | two schemas (`audit`, `public`) and a cross-schema FK `events.log_id → audit.logs.id` |
 | `mysql_users.hcl` | `auto_increment`, `varchar(n)`, a MySQL `enum(...)` type with a default, a unique index |
@@ -75,8 +79,20 @@ uses the alias type names directly (`int2`, `int4`, `int8`, `int`, `float4`,
 and prints these names, but a live Postgres inspect would report the
 canonical names instead (`smallint`, `integer`, `bigint`, …).
 
-The generator is `fxgen/main.go`. It is its own module, and the go command
-ignores it because it sits under `testdata`. To regenerate:
+The generator is `fxgen/main.go`. It is not part of the atlagen module:
 
-1. Point the `replace` directive in `fxgen/go.mod` at an Atlas checkout of the commit above.
-2. Run `go run . ..` from `fxgen/` (it needs Go 1.26, Atlas's toolchain).
+- It sits under `testdata`, which `go build ./...`, `go vet ./...`, `go test ./...` and golangci-lint skip.
+- It has its own `go.mod` (module `fxgen`), so it never adds Atlas to atlagen's dependencies.
+
+To regenerate the Postgres/MySQL fixtures:
+
+```sh
+git clone https://github.com/ariga/atlas /path/to/atlas
+git -C /path/to/atlas checkout ed994a77898e48377f9a9c391f2d1c49f5703b8d
+cd atlagen/internal/testdata/atlas/fxgen
+go mod edit -replace ariga.io/atlas=/path/to/atlas
+cp /path/to/atlas/go.sum .
+GOFLAGS=-mod=mod go run . ..   # writes ../<name>.hcl; needs Go 1.26 (Atlas's go directive)
+```
+
+Do not commit the edited `go.mod` or the copied `go.sum`.

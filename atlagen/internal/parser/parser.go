@@ -33,6 +33,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -87,8 +88,9 @@ type parser struct {
 	enums    []object
 }
 
-// Parse reads Atlas inspect HCL and returns the schema named schemaName, or
-// the first schema block when schemaName is empty. Only tables and enums of
+// Parse reads Atlas inspect HCL and returns the schema named schemaName.
+// When schemaName is empty it picks the only schema, else "public", else
+// "main", and fails if the choice is ambiguous. Only tables and enums of
 // that schema are included. Tables are sorted by DB name; columns, enum
 // values, key columns and uniques keep Atlas order.
 func Parse(data []byte, dialect, schemaName string) (*ir.Schema, error) {
@@ -125,9 +127,6 @@ func Parse(data []byte, dialect, schemaName string) (*ir.Schema, error) {
 			}
 			p.enums = append(p.enums, e)
 		}
-	}
-	if len(schemas) == 0 {
-		return nil, errors.New("atlas hcl has no schemas")
 	}
 	selected, err := selectSchema(schemas, schemaName)
 	if err != nil {
@@ -183,16 +182,28 @@ func Parse(data []byte, dialect, schemaName string) (*ir.Schema, error) {
 	return s, nil
 }
 
+// selectSchema picks the schema named name. Without a name it picks the only
+// schema, else "public", else "main"; any other set of schemas is ambiguous.
 func selectSchema(schemas []string, name string) (string, error) {
-	if name == "" {
+	if len(schemas) == 0 {
+		return "", errors.New("atlas hcl has no schemas")
+	}
+	available := strings.Join(schemas, ", ")
+	if name != "" {
+		if slices.Contains(schemas, name) {
+			return name, nil
+		}
+		return "", fmt.Errorf("schema %q not found (available: %s)", name, available)
+	}
+	if len(schemas) == 1 {
 		return schemas[0], nil
 	}
-	for _, s := range schemas {
-		if s == name {
-			return s, nil
+	for _, fallback := range []string{"public", "main"} {
+		if slices.Contains(schemas, fallback) {
+			return fallback, nil
 		}
 	}
-	return "", fmt.Errorf("schema %q not found (available: %s)", name, strings.Join(schemas, ", "))
+	return "", fmt.Errorf("atlas hcl has several schemas (%s); set schema_name (--schema-name) to pick one", available)
 }
 
 // blockName returns the last label of a block: Atlas prints a schema
@@ -358,6 +369,10 @@ func (p *parser) parseColumn(b *hclsyntax.Block, index int, pk []string, inPK ma
 	// (SQLite reports it for INTEGER PRIMARY KEY and non-INTEGER keys).
 	c.Nullable = null && !c.InPK
 	c.HasDefault = hasDefault || autoIncrement || hasBlock(b.Body, "identity") || serialTypes[baseType(rawType)]
+	// Atlas prints a generated column as an as { expr = "…" type = STORED }
+	// block and also accepts as = "…" (specutil.ConvertGenExpr).
+	_, asAttr := b.Body.Attributes["as"]
+	c.Generated = asAttr || hasBlock(b.Body, "as")
 	// SQLite: an INTEGER PRIMARY KEY column is an alias of the rowid.
 	if p.dialect == "sqlite" && len(pk) == 1 && pk[0] == name && strings.ToLower(rawType) == "integer" {
 		c.HasDefault = true

@@ -45,6 +45,7 @@ type Column struct {
 	Kind       ColumnKind `json:"kind"`
 	Nullable   bool       `json:"nullable"`
 	HasDefault bool       `json:"has_default"`
+	Generated  bool       `json:"generated"` // a generated (computed) column; never written
 	InPK       bool       `json:"in_pk"`
 	Scan       ScanPlan   `json:"scan"`
 }
@@ -89,9 +90,9 @@ type ForeignKey struct {
 }
 
 // RequiredForInsert reports whether an INSERT must set the column: it is
-// NOT NULL and has no default.
+// NOT NULL, has no default and is not generated.
 func (c Column) RequiredForInsert() bool {
-	return !c.Nullable && !c.HasDefault
+	return !c.Nullable && !c.HasDefault && !c.Generated
 }
 
 // Column returns the column with the given DB name.

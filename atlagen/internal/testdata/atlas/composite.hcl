@@ -49,6 +49,14 @@ table "memberships" {
     null = true
     type = timestamptz
   }
+  column "slug_lower" {
+    null = false
+    type = text
+    as {
+      expr = "lower(slug)"
+      type = STORED
+    }
+  }
   primary_key {
     columns = [column.org_id, column.user_id]
   }

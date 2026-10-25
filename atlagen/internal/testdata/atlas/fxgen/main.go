@@ -72,7 +72,8 @@ func pgComposite() *schema.Realm {
 
 	mOrg, mUser, slug := col("org_id", bigint()), col("user_id", bigint()), col("slug", text())
 	role := col("role", text()).SetDefault(&schema.Literal{V: "'member'"})
-	m := schema.NewTable("memberships").AddColumns(mOrg, mUser, slug, role, col("deleted_at", tstz()).SetNull(true))
+	slugLower := col("slug_lower", text()).AddAttrs(&schema.GeneratedExpr{Expr: "lower(slug)", Type: "STORED"})
+	m := schema.NewTable("memberships").AddColumns(mOrg, mUser, slug, role, col("deleted_at", tstz()).SetNull(true), slugLower)
 	m.SetPrimaryKey(schema.NewPrimaryKey(mOrg, mUser))
 	m.AddIndexes(
 		schema.NewUniqueIndex("memberships_org_id_slug_key").AddColumns(mOrg, slug),

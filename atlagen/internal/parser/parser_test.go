@@ -803,10 +803,11 @@ func TestParseSQLiteRowidAlias(t *testing.T) {
 }
 
 func TestParseSchemaSelection(t *testing.T) {
-	// Atlas prints schema blocks last, ordered by name, so "audit" comes first.
+	// Atlas prints schema blocks ordered by name ("audit" first); without a
+	// schema name, "public" wins over the order.
 	s := parseFixture(t, "multi_schema.hcl", "postgres", "")
-	equal(t, "default Name", s.Name, "audit")
-	equal(t, "default tables", tableNames(s), []string{"logs"})
+	equal(t, "default Name", s.Name, "public")
+	equal(t, "default tables", tableNames(s), []string{"events"})
 
 	audit := parseFixture(t, "multi_schema.hcl", "postgres", "audit")
 	equal(t, "audit Name", audit.Name, "audit")
@@ -825,6 +826,82 @@ func TestParseSchemaSelection(t *testing.T) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
 	}
+}
+
+func TestParseSchemaSelectionFallbacks(t *testing.T) {
+	doc := func(schemas ...string) []byte {
+		var b strings.Builder
+		for _, name := range schemas {
+			b.WriteString("table \"t\" {\n  schema = schema." + name + "\n  column \"" + name + "_col\" {\n    type = int\n  }\n}\n")
+		}
+		for _, name := range schemas {
+			b.WriteString("schema \"" + name + "\" {\n}\n")
+		}
+		return []byte(b.String())
+	}
+	for _, tc := range []struct {
+		name    string
+		schemas []string
+		want    string
+	}{
+		{"only schema", []string{"app"}, "app"},
+		{"public over others", []string{"a", "main", "public"}, "public"},
+		{"main over others", []string{"a", "main", "z"}, "main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Parse(doc(tc.schemas...), "postgres", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			equal(t, "Name", s.Name, tc.want)
+			equal(t, "columns", s.Tables[0].Columns[0].DBName, tc.want+"_col")
+		})
+	}
+
+	t.Run("ambiguous", func(t *testing.T) {
+		s, err := Parse(doc("a", "b"), "postgres", "")
+		if err == nil {
+			t.Fatalf("Parse succeeded with %#v, want error", s)
+		}
+		for _, want := range []string{"several schemas", "a, b", "schema_name", "--schema-name"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err, want)
+			}
+		}
+	})
+
+	t.Run("explicit name wins", func(t *testing.T) {
+		s, err := Parse(doc("a", "b"), "postgres", "b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		equal(t, "Name", s.Name, "b")
+	})
+}
+
+func TestParseGeneratedColumns(t *testing.T) {
+	check := func(t *testing.T, c ir.Column) {
+		t.Helper()
+		equal(t, c.DBName+".Generated", c.Generated, true)
+		equal(t, c.DBName+".HasDefault", c.HasDefault, false)
+		equal(t, c.DBName+".Nullable", c.Nullable, false)
+		equal(t, c.DBName+".RequiredForInsert", c.RequiredForInsert(), false)
+	}
+	t.Run("postgres fixture", func(t *testing.T) {
+		m := mustTable(t, parseFixture(t, "composite.hcl", "postgres", ""), "memberships")
+		check(t, mustColumn(t, m, "slug_lower"))
+		equal(t, "slug.Generated", mustColumn(t, m, "slug").Generated, false)
+		equal(t, "slug.RequiredForInsert", mustColumn(t, m, "slug").RequiredForInsert(), true)
+	})
+	t.Run("sqlite fixture", func(t *testing.T) {
+		codes := mustTable(t, parseFixture(t, "sqlite_types.hcl", "sqlite", ""), "codes")
+		check(t, mustColumn(t, codes, "label_upper"))
+		equal(t, "label.Generated", mustColumn(t, codes, "label").Generated, false)
+	})
+	t.Run("as attribute", func(t *testing.T) {
+		s := mustParse(t, inlineTable("t", "column \"a\" {\nnull = false\ntype = int\n}\ncolumn \"b\" {\nnull = false\ntype = int\nas = \"a + 1\"\n}"), "mysql")
+		check(t, mustColumn(t, s.Tables[0], "b"))
+	})
 }
 
 func TestParseErrors(t *testing.T) {

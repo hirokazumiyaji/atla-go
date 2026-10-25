@@ -56,6 +56,14 @@ table "codes" {
     null = false
     type = text
   }
+  column "label_upper" {
+    null = false
+    type = text
+    as {
+      expr = "(upper(label))"
+      type = STORED
+    }
+  }
   primary_key {
     columns = [column.id]
   }
