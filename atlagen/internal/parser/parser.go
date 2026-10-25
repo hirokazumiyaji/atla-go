@@ -1,68 +1,50 @@
-// Package parser turns the JSON printed by `atlas schema inspect --format
-// '{{ json . }}'` into an ir.Schema holding the database facts only. Go names
-// and Go types are filled by later pipeline stages.
+// Package parser turns the HCL printed by `atlas schema inspect -u <url>`
+// (Atlas's default output format) into an ir.Schema holding the database
+// facts only. Go names and Go types are filled by later pipeline stages.
 //
-// Atlas versions and dialects print slightly different shapes (column
-// references as strings or objects, index "parts" or "columns", several
-// auto-increment spellings), so the input is decoded leniently.
+// The document is walked as an hclsyntax AST without an evaluation context:
+// references such as schema.public, column.id or table.users.column.id are
+// read as traversals, and only literal expressions are evaluated.
+//
+// Type renderings, checked against Atlas's type registries
+// (sql/postgres/sqlspec.go, sql/mysql/sqlspec.go, sql/sqlite/sqlspec.go and
+// schemahcl.hclType):
+//
+//   - An identifier is a type name with spaces written as "_"
+//     (double_precision, character_varying(255)); "_" is turned back into a
+//     space. Call arguments are rendered back comma-joined without spaces.
+//   - sql("<t>") is a type Atlas has no spec for (Postgres arrays, citext,
+//     SQLite declared types such as FOO); <t> is used verbatim.
+//   - enum.<name> (enum.<schema>.<name> when two schemas define the name) is
+//     a Postgres enum.
+//
+// Exceptions to the plain rendering:
+//
+//   - String call arguments are rendered as SQL literals: the MySQL type
+//     enum("a","b") becomes enum('a','b'), as MySQL itself reports it.
+//   - Postgres interval types with a field are printed by Atlas without the
+//     "interval" keyword (day_to_second, second(3)); for the postgres dialect
+//     the keyword is restored ("interval day to second").
+//   - A reference to another type object (domain.<name>, composite.<name>)
+//     becomes its last name.
 package parser
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/gohcl"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+
 	"github.com/hirokazumiyaji/atla-go/atlagen/internal/ir"
 )
 
-type atlasDoc struct {
-	Schemas []atlasSchema `json:"schemas"`
-}
-
-type atlasSchema struct {
-	Name   string       `json:"name"`
-	Enums  []atlasEnum  `json:"enums"`
-	Tables []atlasTable `json:"tables"`
-}
-
-type atlasEnum struct {
-	Name   string   `json:"name"`
-	Values []string `json:"values"`
-}
-
-type atlasTable struct {
-	Name        string            `json:"name"`
-	Columns     []atlasColumn     `json:"columns"`
-	PrimaryKey  json.RawMessage   `json:"primary_key"`
-	Indexes     []atlasIndex      `json:"indexes"`
-	ForeignKeys []json.RawMessage `json:"foreign_keys"`
-}
-
-type atlasColumn struct {
-	Name          string            `json:"name"`
-	Type          json.RawMessage   `json:"type"`
-	Null          bool              `json:"null"`
-	Default       json.RawMessage   `json:"default"`
-	AutoIncrement json.RawMessage   `json:"auto_increment"`
-	Identity      json.RawMessage   `json:"identity"`
-	Attrs         []json.RawMessage `json:"attrs"`
-}
-
-type atlasIndex struct {
-	Name    string            `json:"name"`
-	Unique  bool              `json:"unique"`
-	Columns []json.RawMessage `json:"columns"`
-	Parts   []json.RawMessage `json:"parts"`
-	Where   json.RawMessage   `json:"where"`
-}
-
-type atlasKey struct {
-	Columns []json.RawMessage `json:"columns"`
-	Parts   []json.RawMessage `json:"parts"`
-}
+// filename names the input in HCL diagnostics.
+const filename = "schema.hcl"
 
 var serialTypes = map[string]bool{
 	"serial":      true,
@@ -73,138 +55,261 @@ var serialTypes = map[string]bool{
 	"bigserial":   true,
 }
 
-// Parse decodes Atlas inspect JSON and returns the schema named schemaName,
-// or the first schema when schemaName is empty. Tables are sorted by DB name;
-// columns, enum values, key columns and uniques keep Atlas order.
+// intervalFields are the Postgres interval types that Atlas prints by their
+// field alone (sql/postgres/sqlspec.go, TypeRegistry).
+var intervalFields = map[string]bool{
+	"second":           true,
+	"day to second":    true,
+	"hour to second":   true,
+	"minute to second": true,
+	"year":             true,
+	"month":            true,
+	"day":              true,
+	"hour":             true,
+	"minute":           true,
+	"year to month":    true,
+	"day to hour":      true,
+	"day to minute":    true,
+	"hour to minute":   true,
+}
+
+// object is a top-level table or enum block.
+type object struct {
+	name   string
+	schema string
+	body   *hclsyntax.Body
+}
+
+type parser struct {
+	dialect  string
+	selected string
+	tables   []object
+	enums    []object
+}
+
+// Parse reads Atlas inspect HCL and returns the schema named schemaName, or
+// the first schema block when schemaName is empty. Only tables and enums of
+// that schema are included. Tables are sorted by DB name; columns, enum
+// values, key columns and uniques keep Atlas order.
 func Parse(data []byte, dialect, schemaName string) (*ir.Schema, error) {
-	var doc atlasDoc
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("invalid atlas json: %w", err)
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '{' {
+		return nil, errors.New(`input looks like JSON; atlagen reads Atlas HCL — run "atlas schema inspect" without --format`)
 	}
-	if len(doc.Schemas) == 0 {
-		return nil, errors.New("atlas json has no schemas")
+	file, diags := hclsyntax.ParseConfig(data, filename, hcl.InitialPos)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("invalid atlas hcl: %s", formatDiags(diags))
 	}
-	raw, err := selectSchema(doc.Schemas, schemaName)
+	body, ok := file.Body.(*hclsyntax.Body)
+	if !ok {
+		return nil, errors.New("invalid atlas hcl: unexpected body type")
+	}
+
+	p := &parser{dialect: dialect}
+	var schemas []string
+	for _, b := range body.Blocks {
+		switch b.Type {
+		case "schema":
+			if name := blockName(b); name != "" {
+				schemas = append(schemas, name)
+			}
+		case "table":
+			t, err := readObject(b, len(p.tables))
+			if err != nil {
+				return nil, err
+			}
+			p.tables = append(p.tables, t)
+		case "enum":
+			e, err := readObject(b, len(p.enums))
+			if err != nil {
+				return nil, err
+			}
+			p.enums = append(p.enums, e)
+		}
+	}
+	if len(schemas) == 0 {
+		return nil, errors.New("atlas hcl has no schemas")
+	}
+	selected, err := selectSchema(schemas, schemaName)
 	if err != nil {
 		return nil, err
 	}
+	p.selected = selected
 
 	s := &ir.Schema{
-		Name:    raw.Name,
+		Name:    selected,
 		Dialect: dialect,
-		Enums:   make([]ir.Enum, 0, len(raw.Enums)),
-		Tables:  make([]ir.Table, 0, len(raw.Tables)),
+		Enums:   []ir.Enum{},
+		Tables:  []ir.Table{},
 	}
-	enumByLower := make(map[string]string, len(raw.Enums))
-	for i, e := range raw.Enums {
-		if e.Name == "" {
-			return nil, fmt.Errorf("schema %q: enum at index %d has no name", raw.Name, i)
+	seenEnum := make(map[string]bool)
+	for _, e := range p.enums {
+		if e.schema != selected {
+			continue
 		}
-		values := make([]ir.EnumValue, 0, len(e.Values))
-		for _, v := range e.Values {
-			values = append(values, ir.EnumValue{DB: v})
+		if seenEnum[e.name] {
+			return nil, fmt.Errorf("duplicate enum %q", e.name)
 		}
-		s.Enums = append(s.Enums, ir.Enum{DBName: e.Name, Values: values})
-		if _, dup := enumByLower[strings.ToLower(e.Name)]; !dup {
-			enumByLower[strings.ToLower(e.Name)] = e.Name
+		seenEnum[e.name] = true
+		values, ok := stringList(e.body.Attributes["values"])
+		if !ok {
+			return nil, fmt.Errorf("enum %q: values must be a list of strings", e.name)
 		}
+		irValues := make([]ir.EnumValue, 0, len(values))
+		for _, v := range values {
+			irValues = append(irValues, ir.EnumValue{DB: v})
+		}
+		s.Enums = append(s.Enums, ir.Enum{DBName: e.name, Values: irValues})
 	}
 
-	if len(raw.Tables) == 0 {
-		return nil, fmt.Errorf("schema %q has no tables", raw.Name)
-	}
-	seen := make(map[string]bool, len(raw.Tables))
-	for i := range raw.Tables {
-		t, err := parseTable(&raw.Tables[i], i, dialect, enumByLower)
+	seenTable := make(map[string]bool)
+	for _, tb := range p.tables {
+		if tb.schema != selected {
+			continue
+		}
+		t, err := p.parseTable(tb)
 		if err != nil {
 			return nil, err
 		}
-		if seen[t.DBName] {
+		if seenTable[t.DBName] {
 			return nil, fmt.Errorf("duplicate table %q", t.DBName)
 		}
-		seen[t.DBName] = true
+		seenTable[t.DBName] = true
 		s.Tables = append(s.Tables, t)
+	}
+	if len(s.Tables) == 0 {
+		return nil, fmt.Errorf("schema %q has no tables", selected)
 	}
 	sort.Slice(s.Tables, func(i, j int) bool { return s.Tables[i].DBName < s.Tables[j].DBName })
 	return s, nil
 }
 
-func selectSchema(schemas []atlasSchema, name string) (*atlasSchema, error) {
+func selectSchema(schemas []string, name string) (string, error) {
 	if name == "" {
-		return &schemas[0], nil
+		return schemas[0], nil
 	}
-	names := make([]string, 0, len(schemas))
-	for i := range schemas {
-		if schemas[i].Name == name {
-			return &schemas[i], nil
+	for _, s := range schemas {
+		if s == name {
+			return s, nil
 		}
-		names = append(names, schemas[i].Name)
 	}
-	return nil, fmt.Errorf("schema %q not found (available: %s)", name, strings.Join(names, ", "))
+	return "", fmt.Errorf("schema %q not found (available: %s)", name, strings.Join(schemas, ", "))
 }
 
-func parseTable(raw *atlasTable, index int, dialect string, enumByLower map[string]string) (ir.Table, error) {
-	if raw.Name == "" {
-		return ir.Table{}, fmt.Errorf("table at index %d has no name", index)
+// blockName returns the last label of a block: Atlas prints a schema
+// qualifier label before the name when two schemas hold the same name.
+func blockName(b *hclsyntax.Block) string {
+	if len(b.Labels) == 0 {
+		return ""
 	}
+	return b.Labels[len(b.Labels)-1]
+}
+
+// readObject reads the name and schema of a table or enum block; index
+// counts the blocks of that type.
+func readObject(b *hclsyntax.Block, index int) (object, error) {
+	name := blockName(b)
+	if name == "" {
+		return object{}, fmt.Errorf("%s at index %d has no name", b.Type, index)
+	}
+	schema, err := schemaRef(b.Body)
+	if err != nil {
+		return object{}, fmt.Errorf("%s %q: %w", b.Type, name, err)
+	}
+	return object{name: name, schema: schema, body: b.Body}, nil
+}
+
+// schemaRef reads the "schema = schema.<name>" attribute of a block.
+func schemaRef(body *hclsyntax.Body) (string, error) {
+	attr, ok := body.Attributes["schema"]
+	if !ok {
+		return "", errors.New("missing schema reference")
+	}
+	names, ok := traversalNames(attr.Expr)
+	if !ok || len(names) != 2 || names[0] != "schema" {
+		return "", errors.New("schema: expected a reference like schema.<name>")
+	}
+	return names[1], nil
+}
+
+func (p *parser) parseTable(tb object) (ir.Table, error) {
 	t := ir.Table{
-		DBName:      raw.Name,
-		Columns:     make([]ir.Column, 0, len(raw.Columns)),
+		DBName:      tb.name,
+		Columns:     []ir.Column{},
+		PrimaryKey:  []string{},
 		Uniques:     [][]string{},
 		ForeignKeys: []ir.ForeignKey{},
 	}
-	wrap := func(err error) error { return fmt.Errorf("table %q: %w", raw.Name, err) }
+	wrap := func(err error) error { return fmt.Errorf("table %q: %w", tb.name, err) }
 
-	pk, err := parsePrimaryKey(raw.PrimaryKey)
-	if err != nil {
-		return ir.Table{}, wrap(fmt.Errorf("primary key: %w", err))
+	for _, b := range tb.body.Blocks {
+		if b.Type != "primary_key" {
+			continue
+		}
+		cols, ok := keyColumns(b.Body)
+		if !ok {
+			return ir.Table{}, wrap(errors.New("primary key: unrecognized column reference"))
+		}
+		t.PrimaryKey = cols
+		break
 	}
-	t.PrimaryKey = pk
-	inPK := make(map[string]bool, len(pk))
-	for _, c := range pk {
+	inPK := make(map[string]bool, len(t.PrimaryKey))
+	for _, c := range t.PrimaryKey {
 		inPK[c] = true
 	}
 
-	known := make(map[string]bool, len(raw.Columns))
-	for i := range raw.Columns {
-		c, err := parseColumn(&raw.Columns[i], i, dialect, pk, inPK, enumByLower)
+	known := make(map[string]bool)
+	columnIndex := 0
+	for _, b := range tb.body.Blocks {
+		if b.Type != "column" {
+			continue
+		}
+		c, err := p.parseColumn(b, columnIndex, t.PrimaryKey, inPK)
 		if err != nil {
 			return ir.Table{}, wrap(err)
 		}
+		columnIndex++
 		if known[c.DBName] {
 			return ir.Table{}, wrap(fmt.Errorf("duplicate column %q", c.DBName))
 		}
 		known[c.DBName] = true
 		t.Columns = append(t.Columns, c)
 	}
-	if err := checkColumns("primary key", pk, known); err != nil {
+	if err := checkColumns("primary key", t.PrimaryKey, known); err != nil {
 		return ir.Table{}, wrap(err)
 	}
 
-	for i := range raw.Indexes {
-		cols, ok := uniqueColumns(&raw.Indexes[i])
-		if !ok {
-			continue
+	indexes := map[string]int{}
+	fkIndex := 0
+	for _, b := range tb.body.Blocks {
+		switch b.Type {
+		case "index", "unique":
+			label := fmt.Sprintf("%s %q", b.Type, blockName(b))
+			if blockName(b) == "" {
+				label = fmt.Sprintf("unnamed %s %d", b.Type, indexes[b.Type])
+			}
+			indexes[b.Type]++
+			cols, ok, err := uniqueColumns(b)
+			if err != nil {
+				return ir.Table{}, wrap(fmt.Errorf("%s: %w", label, err))
+			}
+			if !ok {
+				continue
+			}
+			if err := checkColumns(label, cols, known); err != nil {
+				return ir.Table{}, wrap(err)
+			}
+			t.Uniques = append(t.Uniques, cols)
+		case "foreign_key":
+			fk, err := p.parseForeignKey(b, fkIndex, tb.name)
+			if err != nil {
+				return ir.Table{}, wrap(err)
+			}
+			fkIndex++
+			if err := checkColumns(fmt.Sprintf("foreign key %q", fk.Symbol), fk.Columns, known); err != nil {
+				return ir.Table{}, wrap(err)
+			}
+			t.ForeignKeys = append(t.ForeignKeys, fk)
 		}
-		label := fmt.Sprintf("index %q", raw.Indexes[i].Name)
-		if raw.Indexes[i].Name == "" {
-			label = fmt.Sprintf("unnamed index %d", i)
-		}
-		if err := checkColumns(label, cols, known); err != nil {
-			return ir.Table{}, wrap(err)
-		}
-		t.Uniques = append(t.Uniques, cols)
-	}
-
-	for i, rawFK := range raw.ForeignKeys {
-		fk, err := parseForeignKey(rawFK, i)
-		if err != nil {
-			return ir.Table{}, wrap(err)
-		}
-		if err := checkColumns(fmt.Sprintf("foreign key %q", fk.Symbol), fk.Columns, known); err != nil {
-			return ir.Table{}, wrap(err)
-		}
-		t.ForeignKeys = append(t.ForeignKeys, fk)
 	}
 	return t, nil
 }
@@ -218,107 +323,139 @@ func checkColumns(label string, cols []string, known map[string]bool) error {
 	return nil
 }
 
-func parseColumn(raw *atlasColumn, index int, dialect string, pk []string, inPK map[string]bool, enumByLower map[string]string) (ir.Column, error) {
-	if raw.Name == "" {
+func (p *parser) parseColumn(b *hclsyntax.Block, index int, pk []string, inPK map[string]bool) (ir.Column, error) {
+	name := blockName(b)
+	if name == "" {
 		return ir.Column{}, fmt.Errorf("column at index %d has no name", index)
 	}
-	rawType := extractRawType(raw.Type)
-	if rawType == "" {
-		return ir.Column{}, fmt.Errorf("column %q: missing type", raw.Name)
+	wrap := func(err error) error { return fmt.Errorf("column %q: %w", name, err) }
+
+	typeAttr, ok := b.Body.Attributes["type"]
+	if !ok {
+		return ir.Column{}, wrap(errors.New("missing type"))
 	}
+	rawType, enum, err := p.columnType(typeAttr.Expr)
+	if err != nil {
+		return ir.Column{}, wrap(err)
+	}
+	null, err := boolAttr(b.Body, "null")
+	if err != nil {
+		return ir.Column{}, wrap(err)
+	}
+	autoIncrement, err := boolAttr(b.Body, "auto_increment")
+	if err != nil {
+		return ir.Column{}, wrap(err)
+	}
+	_, hasDefault := b.Body.Attributes["default"]
+
 	c := ir.Column{
-		DBName:     raw.Name,
-		RawType:    rawType,
-		Enum:       enumByLower[enumKey(rawType)],
-		InPK:       inPK[raw.Name],
-		HasDefault: columnHasDefault(raw, rawType),
+		DBName:  name,
+		RawType: rawType,
+		Enum:    enum,
+		InPK:    inPK[name],
 	}
-	// Primary-key columns are never NULL, even when Atlas reports null=true
-	// (SQLite allows it for non-INTEGER keys).
-	c.Nullable = raw.Null && !c.InPK
+	// Primary-key columns are never NULL, even when Atlas prints null = true
+	// (SQLite reports it for INTEGER PRIMARY KEY and non-INTEGER keys).
+	c.Nullable = null && !c.InPK
+	c.HasDefault = hasDefault || autoIncrement || hasBlock(b.Body, "identity") || serialTypes[baseType(rawType)]
 	// SQLite: an INTEGER PRIMARY KEY column is an alias of the rowid.
-	if dialect == "sqlite" && len(pk) == 1 && pk[0] == raw.Name && strings.ToLower(rawType) == "integer" {
+	if p.dialect == "sqlite" && len(pk) == 1 && pk[0] == name && strings.ToLower(rawType) == "integer" {
 		c.HasDefault = true
 	}
 	return c, nil
 }
 
-// enumKey lowercases a raw type and strips a "schema." prefix.
-func enumKey(rawType string) string {
-	key := strings.ToLower(rawType)
-	if i := strings.LastIndexByte(key, '.'); i >= 0 {
-		key = key[i+1:]
-	}
-	return key
-}
-
-// extractRawType reads a column type given as a string, as an object with a
-// "raw", "type" or "name" string, or as an object nesting one under "Type" or
-// "T". It returns "" when no type is found.
-func extractRawType(raw json.RawMessage) string {
-	if s, ok := asString(raw); ok {
-		return s
-	}
-	obj, ok := asObject(raw)
-	if !ok {
-		return ""
-	}
-	for _, key := range []string{"raw", "type", "name"} {
-		if s, ok := asString(obj[key]); ok && s != "" {
-			return s
-		}
-	}
-	nested := obj["Type"]
-	if !truthyValue(nested) {
-		nested = obj["T"]
-	}
-	if _, ok := asObject(nested); ok {
-		return extractRawType(nested)
-	}
-	return ""
-}
-
-// columnHasDefault reports whether the database fills the column when an
-// INSERT omits it: a DEFAULT, a serial-family type, AUTO_INCREMENT or an
-// identity, in any of the spellings Atlas uses.
-func columnHasDefault(raw *atlasColumn, rawType string) bool {
-	if !isNull(raw.Default) {
-		return true
-	}
-	if serialTypes[normalizeTypeName(rawType)] {
-		return true
-	}
-	if truthy(raw.AutoIncrement) || !isNull(raw.Identity) {
-		return true
-	}
-	for _, a := range raw.Attrs {
-		attr, ok := asObject(a)
+// columnType renders a column's type expression as a raw type and reports
+// the enum it names, if the enum belongs to the selected schema.
+func (p *parser) columnType(expr hclsyntax.Expression) (rawType, enum string, err error) {
+	unsupported := errors.New("unsupported type expression")
+	switch e := expr.(type) {
+	case *hclsyntax.ScopeTraversalExpr:
+		names, ok := traversalNames(e)
 		if !ok {
+			return "", "", unsupported
+		}
+		if len(names) == 1 {
+			return p.typeName(names[0]), "", nil
+		}
+		if names[0] == "enum" && len(names) <= 3 {
+			return p.enumType(names[1:])
+		}
+		return names[len(names)-1], "", nil
+	case *hclsyntax.FunctionCallExpr:
+		if e.Name == "sql" {
+			if len(e.Args) != 1 {
+				return "", "", unsupported
+			}
+			s, ok := stringLiteral(e.Args[0])
+			if !ok {
+				return "", "", unsupported
+			}
+			return s, "", nil
+		}
+		args := make([]string, 0, len(e.Args))
+		for _, a := range e.Args {
+			s, ok := typeArg(a)
+			if !ok {
+				return "", "", unsupported
+			}
+			args = append(args, s)
+		}
+		return p.typeName(e.Name) + "(" + strings.Join(args, ",") + ")", "", nil
+	}
+	return "", "", unsupported
+}
+
+// typeName turns an HCL type identifier back into the database type name.
+func (p *parser) typeName(ident string) string {
+	name := strings.ReplaceAll(ident, "_", " ")
+	if p.dialect == "postgres" && intervalFields[name] {
+		return "interval " + name
+	}
+	return name
+}
+
+// enumType resolves enum.<name> or enum.<schema>.<name>. An unqualified name
+// prefers the selected schema; enum names match exactly.
+func (p *parser) enumType(ref []string) (rawType, enum string, err error) {
+	qualifier, name := "", ref[len(ref)-1]
+	if len(ref) == 2 {
+		qualifier = ref[0]
+	}
+	var found []string
+	for _, e := range p.enums {
+		if e.name != name || qualifier != "" && e.schema != qualifier {
 			continue
 		}
-		attrType, _ := asString(attr["type"])
-		if attrType == "" {
-			attrType, _ = asString(attr["@type"])
+		if e.schema == p.selected {
+			return name, name, nil
 		}
-		attrType = strings.ToLower(attrType)
-		name, _ := asString(attr["name"])
-		name = strings.ToLower(name)
-		switch {
-		case strings.Contains(attrType, "auto_increment"), strings.Contains(attrType, "identity"):
-			return true
-		case strings.Contains(name, "auto_increment"), strings.Contains(name, "identity"):
-			return true
-		case isJSONTrue(attr["auto_increment"]), !isNull(attr["identity"]):
-			return true
-		}
+		found = append(found, e.schema)
 	}
-	if obj, ok := asObject(raw.Type); ok && truthy(obj["auto_increment"]) {
-		return true
+	if len(found) == 1 {
+		// Enums of other schemas are not part of the IR.
+		return found[0] + "." + name, "", nil
 	}
-	return false
+	return "", "", fmt.Errorf("unknown enum %q", strings.Join(ref, "."))
 }
 
-func normalizeTypeName(rawType string) string {
+// typeArg renders one type call argument: numbers as written, strings as
+// SQL literals.
+func typeArg(expr hclsyntax.Expression) (string, bool) {
+	if s, ok := stringLiteral(expr); ok {
+		return "'" + strings.ReplaceAll(s, "'", "''") + "'", true
+	}
+	if _, ok := expr.(*hclsyntax.LiteralValueExpr); !ok {
+		return "", false
+	}
+	var s string
+	if diags := gohcl.DecodeExpression(expr, nil, &s); diags.HasErrors() {
+		return "", false
+	}
+	return s, true
+}
+
+func baseType(rawType string) string {
 	base := strings.ToLower(strings.TrimSpace(rawType))
 	if i := strings.IndexByte(base, '('); i >= 0 {
 		base = strings.TrimSpace(base[:i])
@@ -326,173 +463,50 @@ func normalizeTypeName(rawType string) string {
 	return base
 }
 
-func parsePrimaryKey(raw json.RawMessage) ([]string, error) {
-	if isNull(raw) {
-		return []string{}, nil
+// uniqueColumns returns the columns of an index or unique constraint that
+// proves a column set unique: unique = true (implied for a "unique" block),
+// no "where" predicate and only plain column parts.
+func uniqueColumns(b *hclsyntax.Block) ([]string, bool, error) {
+	if b.Type == "index" {
+		unique, err := boolAttr(b.Body, "unique")
+		if err != nil || !unique {
+			return nil, false, err
+		}
 	}
-	var key atlasKey
-	if err := json.Unmarshal(raw, &key); err != nil {
-		return nil, fmt.Errorf("invalid shape: %w", err)
+	if _, partial := b.Body.Attributes["where"]; partial {
+		return nil, false, nil
 	}
-	refs := key.Columns
-	if len(refs) == 0 {
-		refs = key.Parts
+	cols, ok := keyColumns(b.Body)
+	if !ok || len(cols) == 0 {
+		return nil, false, nil
 	}
-	cols, ok := columnRefs(refs)
-	if !ok {
-		return nil, errors.New("unrecognized column reference")
-	}
-	return cols, nil
+	return cols, true, nil
 }
 
-// uniqueColumns returns the columns of a unique index whose parts are all
-// plain columns. Non-unique, partial ("where") and expression indexes report
-// false: they cannot prove that a column set is unique.
-func uniqueColumns(idx *atlasIndex) ([]string, bool) {
-	if !idx.Unique {
-		return nil, false
-	}
-	if !isNull(idx.Where) {
-		if s, ok := asString(idx.Where); !ok || s != "" {
+// keyColumns reads the parts of a primary key or index, given as
+// columns = [column.a, …] or as on { column = column.a } blocks. It reports
+// false when a part is not a plain column, such as on { expr = "…" }.
+func keyColumns(body *hclsyntax.Body) ([]string, bool) {
+	cols := []string{}
+	if attr, ok := body.Attributes["columns"]; ok {
+		list, ok := columnList(attr.Expr)
+		if !ok {
 			return nil, false
 		}
+		cols = append(cols, list...)
 	}
-	refs := idx.Columns
-	if len(refs) == 0 {
-		refs = idx.Parts
-	}
-	cols, ok := columnRefs(refs)
-	if !ok || len(cols) == 0 {
-		return nil, false
-	}
-	return cols, true
-}
-
-func parseForeignKey(raw json.RawMessage, index int) (ir.ForeignKey, error) {
-	obj, ok := asObject(raw)
-	if !ok {
-		return ir.ForeignKey{}, fmt.Errorf("foreign key at index %d is not an object", index)
-	}
-	symbol, _ := asString(obj["name"])
-	if symbol == "" {
-		symbol, _ = asString(obj["symbol"])
-	}
-	label := fmt.Sprintf("foreign key %q", symbol)
-	if symbol == "" {
-		label = fmt.Sprintf("foreign key at index %d", index)
-	}
-
-	cols, ok := columnRefs(asList(obj["columns"]))
-	if !ok {
-		return ir.ForeignKey{}, fmt.Errorf("%s: unrecognized column reference", label)
-	}
-	if len(cols) == 0 {
-		return ir.ForeignKey{}, fmt.Errorf("%s: missing columns", label)
-	}
-
-	ref, hasRef := asObject(obj["ref"])
-	if !hasRef {
-		ref, hasRef = asObject(obj["references"])
-	}
-	refList := asList(obj["ref_columns"])
-	if len(refList) == 0 {
-		refList = asList(obj["referenced_columns"])
-	}
-	if len(refList) == 0 && hasRef {
-		refList = asList(ref["columns"])
-		if len(refList) == 0 {
-			refList = asList(ref["ref_columns"])
+	for _, b := range body.Blocks {
+		if b.Type != "on" {
+			continue
 		}
-	}
-	refCols, ok := columnRefs(refList)
-	if !ok {
-		return ir.ForeignKey{}, fmt.Errorf("%s: unrecognized referenced column", label)
-	}
-
-	refSchema, refTable := extractRefTable(obj, ref)
-	if refTable == "" {
-		return ir.ForeignKey{}, fmt.Errorf("%s: missing referenced table", label)
-	}
-	if len(refCols) == 0 {
-		return ir.ForeignKey{}, fmt.Errorf("%s: missing referenced columns", label)
-	}
-	if len(cols) != len(refCols) {
-		return ir.ForeignKey{}, fmt.Errorf("%s: %d columns reference %d columns", label, len(cols), len(refCols))
-	}
-	if symbol == "" {
-		symbol = "fk_" + strings.Join(cols, "_") + "_" + refTable
-	}
-	return ir.ForeignKey{
-		Symbol:     symbol,
-		Columns:    cols,
-		RefSchema:  refSchema,
-		RefTable:   refTable,
-		RefColumns: refCols,
-	}, nil
-}
-
-// extractRefTable finds the referenced table of a foreign key under
-// "ref_table", "referenced_table" or "table", or in the "ref"/"references"
-// object (a string, or an object with "table", "name" or "t").
-func extractRefTable(fk, ref map[string]json.RawMessage) (schema, table string) {
-	for _, key := range []string{"ref_table", "referenced_table", "table"} {
-		if schema, table = tableNameFromValue(fk[key]); table != "" {
-			return schema, table
+		if _, ok := b.Body.Attributes["expr"]; ok {
+			return nil, false
 		}
-	}
-	if s, ok := asString(fk["ref"]); ok && s != "" {
-		return splitQualified(s)
-	}
-	for _, key := range []string{"table", "name", "t"} {
-		if schema, table = tableNameFromValue(ref[key]); table != "" {
-			return schema, table
+		attr, ok := b.Body.Attributes["column"]
+		if !ok {
+			return nil, false
 		}
-	}
-	return "", ""
-}
-
-func tableNameFromValue(raw json.RawMessage) (schema, table string) {
-	if s, ok := asString(raw); ok && s != "" {
-		return splitQualified(s)
-	}
-	obj, ok := asObject(raw)
-	if !ok {
-		return "", ""
-	}
-	if name, ok := asString(obj["name"]); ok && name != "" {
-		return schemaName(obj["schema"]), name
-	}
-	if nested, ok := obj["table"]; ok {
-		return tableNameFromValue(nested)
-	}
-	return "", ""
-}
-
-// splitQualified splits "schema.table"; a name without a dot has no schema.
-func splitQualified(s string) (schema, table string) {
-	if schema, table, ok := strings.Cut(s, "."); ok && schema != "" && table != "" {
-		return schema, table
-	}
-	return "", s
-}
-
-func schemaName(raw json.RawMessage) string {
-	if s, ok := asString(raw); ok {
-		return s
-	}
-	if obj, ok := asObject(raw); ok {
-		s, _ := asString(obj["name"])
-		return s
-	}
-	return ""
-}
-
-// columnRefs resolves a list of column references. It reports false when an
-// entry is not a plain column, such as an index expression part.
-func columnRefs(refs []json.RawMessage) ([]string, bool) {
-	cols := make([]string, 0, len(refs))
-	for _, r := range refs {
-		c, ok := columnRef(r)
+		c, ok := columnName(attr.Expr)
 		if !ok {
 			return nil, false
 		}
@@ -501,98 +515,234 @@ func columnRefs(refs []json.RawMessage) ([]string, bool) {
 	return cols, true
 }
 
-// columnRef resolves "email", {"name": "email"}, {"column": "email"},
-// {"c": "email"}, {"column": {"name": "email"}} and {"c": {"name": "email"}}.
-func columnRef(raw json.RawMessage) (string, bool) {
-	if s, ok := asString(raw); ok {
-		return s, s != ""
+func (p *parser) parseForeignKey(b *hclsyntax.Block, index int, table string) (ir.ForeignKey, error) {
+	symbol := blockName(b)
+	label := fmt.Sprintf("foreign key %q", symbol)
+	if symbol == "" {
+		label = fmt.Sprintf("foreign key at index %d", index)
 	}
-	obj, ok := asObject(raw)
+	fail := func(msg string) (ir.ForeignKey, error) { return ir.ForeignKey{}, fmt.Errorf("%s: %s", label, msg) }
+
+	var cols []string
+	if attr, ok := b.Body.Attributes["columns"]; ok {
+		if cols, ok = columnList(attr.Expr); !ok {
+			return fail("unrecognized column reference")
+		}
+	}
+	if len(cols) == 0 {
+		return fail("missing columns")
+	}
+
+	var refs []hclsyntax.Expression
+	if attr, ok := b.Body.Attributes["ref_columns"]; ok {
+		tuple, ok := attr.Expr.(*hclsyntax.TupleConsExpr)
+		if !ok {
+			return fail("unrecognized referenced column")
+		}
+		refs = tuple.Exprs
+	}
+	if len(refs) == 0 {
+		return fail("missing referenced columns")
+	}
+	var refQualifier, refTable string
+	refCols := make([]string, 0, len(refs))
+	for i, r := range refs {
+		qualifier, t, c, ok := refColumn(r, table)
+		if !ok {
+			return fail("unrecognized referenced column")
+		}
+		if i > 0 && (qualifier != refQualifier || t != refTable) {
+			return fail("referenced columns must belong to one table")
+		}
+		refQualifier, refTable = qualifier, t
+		refCols = append(refCols, c)
+	}
+	if len(cols) != len(refCols) {
+		return fail(fmt.Sprintf("%d columns reference %d columns", len(cols), len(refCols)))
+	}
+	if symbol == "" {
+		symbol = "fk_" + strings.Join(cols, "_") + "_" + refTable
+	}
+	return ir.ForeignKey{
+		Symbol:     symbol,
+		Columns:    cols,
+		RefSchema:  p.refSchema(refQualifier, refTable),
+		RefTable:   refTable,
+		RefColumns: refCols,
+	}, nil
+}
+
+// refColumn reads a referenced column: column.<c> (the table itself),
+// table.<t>.column.<c>, or table.<schema>.<t>.column.<c>, which Atlas prints
+// when two schemas hold a table named <t>.
+func refColumn(expr hclsyntax.Expression, self string) (qualifier, table, column string, ok bool) {
+	names, ok := traversalNames(expr)
 	if !ok {
+		return "", "", "", false
+	}
+	switch {
+	case len(names) == 2 && names[0] == "column":
+		return "", self, names[1], true
+	case len(names) == 4 && names[0] == "table" && names[2] == "column":
+		return "", names[1], names[3], true
+	case len(names) == 5 && names[0] == "table" && names[3] == "column":
+		return names[1], names[2], names[4], true
+	}
+	return "", "", "", false
+}
+
+// refSchema returns the schema of a referenced table, or "" when it is the
+// selected schema. An unqualified name means the selected schema if it holds
+// the table, else the only other schema that does.
+func (p *parser) refSchema(qualifier, table string) string {
+	if qualifier != "" {
+		if qualifier == p.selected {
+			return ""
+		}
+		return qualifier
+	}
+	var others []string
+	for _, t := range p.tables {
+		if t.name != table {
+			continue
+		}
+		if t.schema == p.selected {
+			return ""
+		}
+		others = append(others, t.schema)
+	}
+	if len(others) == 1 {
+		return others[0]
+	}
+	return ""
+}
+
+// columnList reads [column.a, column.b].
+func columnList(expr hclsyntax.Expression) ([]string, bool) {
+	tuple, ok := expr.(*hclsyntax.TupleConsExpr)
+	if !ok {
+		return nil, false
+	}
+	cols := make([]string, 0, len(tuple.Exprs))
+	for _, e := range tuple.Exprs {
+		c, ok := columnName(e)
+		if !ok {
+			return nil, false
+		}
+		cols = append(cols, c)
+	}
+	return cols, true
+}
+
+// columnName reads column.<name> (or column["<name>"]).
+func columnName(expr hclsyntax.Expression) (string, bool) {
+	names, ok := traversalNames(expr)
+	if !ok || len(names) != 2 || names[0] != "column" {
 		return "", false
 	}
-	if s, ok := asString(obj["name"]); ok && s != "" {
-		return s, true
-	}
-	for _, key := range []string{"column", "c"} {
-		if s, ok := asString(obj[key]); ok && s != "" {
-			return s, true
-		}
-		if col, ok := asObject(obj[key]); ok {
-			if s, ok := asString(col["name"]); ok && s != "" {
-				return s, true
-			}
-		}
-	}
-	return "", false
+	return names[1], true
 }
 
-func isNull(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
-}
-
-func isJSONTrue(raw json.RawMessage) bool {
-	return bytes.Equal(bytes.TrimSpace(raw), []byte("true"))
-}
-
-// truthy reports a JSON true or one of the strings "true", "1", "yes".
-func truthy(raw json.RawMessage) bool {
-	if isJSONTrue(raw) {
-		return true
-	}
-	s, ok := asString(raw)
+// traversalNames returns the steps of a reference such as table.users or
+// column["2fa"]. Atlas writes names that are not identifiers as string
+// index keys.
+func traversalNames(expr hclsyntax.Expression) ([]string, bool) {
+	e, ok := expr.(*hclsyntax.ScopeTraversalExpr)
 	if !ok {
-		return false
+		return nil, false
 	}
-	switch strings.ToLower(s) {
-	case "true", "1", "yes":
-		return true
+	names := make([]string, 0, len(e.Traversal))
+	for _, step := range e.Traversal {
+		switch s := step.(type) {
+		case hcl.TraverseRoot:
+			names = append(names, s.Name)
+		case hcl.TraverseAttr:
+			names = append(names, s.Name)
+		case hcl.TraverseIndex:
+			var key string
+			if diags := gohcl.DecodeExpression(&hclsyntax.LiteralValueExpr{Val: s.Key}, nil, &key); diags.HasErrors() {
+				return nil, false
+			}
+			names = append(names, key)
+		default:
+			return nil, false
+		}
+	}
+	return names, true
+}
+
+// stringLiteral reads a quoted string without interpolations.
+func stringLiteral(expr hclsyntax.Expression) (string, bool) {
+	t, ok := expr.(*hclsyntax.TemplateExpr)
+	if !ok || !t.IsStringLiteral() {
+		return "", false
+	}
+	v, diags := t.Value(nil)
+	if diags.HasErrors() {
+		return "", false
+	}
+	return v.AsString(), true
+}
+
+// stringList reads a list of string literals; a missing attribute is not a
+// list.
+func stringList(attr *hclsyntax.Attribute) ([]string, bool) {
+	if attr == nil {
+		return nil, false
+	}
+	tuple, ok := attr.Expr.(*hclsyntax.TupleConsExpr)
+	if !ok {
+		return nil, false
+	}
+	values := make([]string, 0, len(tuple.Exprs))
+	for _, e := range tuple.Exprs {
+		s, ok := stringLiteral(e)
+		if !ok {
+			return nil, false
+		}
+		values = append(values, s)
+	}
+	return values, true
+}
+
+// boolAttr reads an optional boolean attribute; absent means false.
+func boolAttr(body *hclsyntax.Body, name string) (bool, error) {
+	attr, ok := body.Attributes[name]
+	if !ok {
+		return false, nil
+	}
+	var v bool
+	if diags := gohcl.DecodeExpression(attr.Expr, nil, &v); diags.HasErrors() {
+		return false, fmt.Errorf("%s: %s", name, formatDiags(diags))
+	}
+	return v, nil
+}
+
+// formatDiags renders error diagnostics as "schema.hcl:line:col: summary;
+// detail", joined by "; ".
+func formatDiags(diags hcl.Diagnostics) string {
+	msgs := make([]string, 0, len(diags))
+	for _, d := range diags {
+		if d.Severity != hcl.DiagError {
+			continue
+		}
+		msg := d.Summary
+		if d.Detail != "" {
+			msg += "; " + d.Detail
+		}
+		if r := d.Subject; r != nil {
+			msg = fmt.Sprintf("%s:%d:%d: %s", r.Filename, r.Start.Line, r.Start.Column, msg)
+		}
+		msgs = append(msgs, msg)
+	}
+	return strings.Join(msgs, "; ")
+}
+
+func hasBlock(body *hclsyntax.Body, blockType string) bool {
+	for _, b := range body.Blocks {
+		if b.Type == blockType {
+			return true
+		}
 	}
 	return false
-}
-
-// truthyValue mirrors Python truthiness for "x or y" fallbacks.
-func truthyValue(raw json.RawMessage) bool {
-	switch strings.TrimSpace(string(raw)) {
-	case "", "null", "false", "0", `""`, "[]", "{}":
-		return false
-	}
-	return true
-}
-
-func asString(raw json.RawMessage) (string, bool) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '"' {
-		return "", false
-	}
-	var s string
-	if err := json.Unmarshal(trimmed, &s); err != nil {
-		return "", false
-	}
-	return s, true
-}
-
-func asObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil, false
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &obj); err != nil {
-		return nil, false
-	}
-	return obj, true
-}
-
-func asList(raw json.RawMessage) []json.RawMessage {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '[' {
-		return nil
-	}
-	var list []json.RawMessage
-	if err := json.Unmarshal(trimmed, &list); err != nil {
-		return nil
-	}
-	return list
 }

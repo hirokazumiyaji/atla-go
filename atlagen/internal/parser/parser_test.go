@@ -11,15 +11,29 @@ import (
 	"github.com/hirokazumiyaji/atla-go/atlagen/internal/ir"
 )
 
-func parseFixture(t *testing.T, name, dialect, schemaName string) *ir.Schema {
+func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "testdata", "atlas", name))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := Parse(data, dialect, schemaName)
+	return data
+}
+
+func parseFixture(t *testing.T, name, dialect, schemaName string) *ir.Schema {
+	t.Helper()
+	s, err := Parse(readFixture(t, name), dialect, schemaName)
 	if err != nil {
 		t.Fatalf("Parse(%s): %v", name, err)
+	}
+	return s
+}
+
+func mustParse(t *testing.T, src, dialect string) *ir.Schema {
+	t.Helper()
+	s, err := Parse([]byte(src), dialect, "")
+	if err != nil {
+		t.Fatalf("Parse: %v\n%s", err, src)
 	}
 	return s
 }
@@ -59,13 +73,19 @@ func equal(t *testing.T, what string, got, want any) {
 	}
 }
 
-// inlineSchema wraps one table's JSON in a single-schema Atlas document.
-func inlineSchema(tableJSON string) []byte {
-	return []byte(`{"schemas":[{"name":"main","tables":[` + tableJSON + `]}]}`)
+// inlineTables wraps table blocks in a document with a single "main" schema.
+func inlineTables(tables string) string {
+	return tables + "\nschema \"main\" {\n}\n"
+}
+
+// inlineTable builds a one-table document; body is the table body without
+// the schema attribute.
+func inlineTable(name, body string) string {
+	return inlineTables("table \"" + name + "\" {\n  schema = schema.main\n" + body + "\n}")
 }
 
 func TestParsePostgresUsers(t *testing.T) {
-	s := parseFixture(t, "postgres_users.json", "postgres", "")
+	s := parseFixture(t, "postgres_users.hcl", "postgres", "")
 
 	equal(t, "Name", s.Name, "public")
 	equal(t, "Dialect", s.Dialect, "postgres")
@@ -101,7 +121,8 @@ func TestParsePostgresUsers(t *testing.T) {
 		t.Error("users.from: RequiredForInsert = true, want false")
 	}
 
-	equal(t, "users.created_at.HasDefault", mustColumn(t, users, "created_at").HasDefault, true)
+	equal(t, "users.created_at", mustColumn(t, users, "created_at"),
+		ir.Column{DBName: "created_at", RawType: "timestamptz", HasDefault: true})
 
 	var colNames []string
 	for _, c := range users.Columns {
@@ -110,7 +131,7 @@ func TestParsePostgresUsers(t *testing.T) {
 	equal(t, "users columns (Atlas order)", colNames, []string{"id", "email", "role", "from", "created_at"})
 
 	posts := mustTable(t, s, "posts")
-	equal(t, "posts.id.HasDefault", mustColumn(t, posts, "id").HasDefault, true)
+	equal(t, "posts.id.HasDefault (identity)", mustColumn(t, posts, "id").HasDefault, true)
 	equal(t, "posts.user_id.HasDefault", mustColumn(t, posts, "user_id").HasDefault, false)
 	equal(t, "posts.Uniques", posts.Uniques, [][]string{})
 	equal(t, "posts.ForeignKeys", posts.ForeignKeys, []ir.ForeignKey{{
@@ -127,7 +148,7 @@ func TestParsePostgresUsers(t *testing.T) {
 }
 
 func TestParseLeavesGoFieldsZero(t *testing.T) {
-	for _, f := range []string{"postgres_users.json", "pg_types.json", "composite.json"} {
+	for _, f := range []string{"postgres_users.hcl", "pg_types.hcl", "composite.hcl"} {
 		s := parseFixture(t, f, "postgres", "")
 		for _, e := range s.Enums {
 			if e.GoName != "" {
@@ -153,10 +174,7 @@ func TestParseLeavesGoFieldsZero(t *testing.T) {
 }
 
 func TestParseDeterministic(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "testdata", "atlas", "composite.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readFixture(t, "composite.hcl")
 	var dumps [2]string
 	for i := range dumps {
 		s, err := Parse(data, "postgres", "")
@@ -177,67 +195,68 @@ func TestParseDeterministic(t *testing.T) {
 	}
 }
 
-func TestParseShapeVariants(t *testing.T) {
+func TestParseDialectFixtures(t *testing.T) {
 	t.Run("sqlite_users", func(t *testing.T) {
-		s := parseFixture(t, "sqlite_users.json", "sqlite", "")
+		s := parseFixture(t, "sqlite_users.hcl", "sqlite", "")
 		equal(t, "Name", s.Name, "main")
 		users := mustTable(t, s, "users")
-		equal(t, "users.id.HasDefault", mustColumn(t, users, "id").HasDefault, true)
+		// Atlas prints null = true for the INTEGER PRIMARY KEY; PK columns are never nullable.
+		equal(t, "users.id", mustColumn(t, users, "id"), ir.Column{DBName: "id", RawType: "integer", HasDefault: true, InPK: true})
 		equal(t, "users.email.HasDefault", mustColumn(t, users, "email").HasDefault, false)
+		equal(t, "users.type.Nullable", mustColumn(t, users, "type").Nullable, true)
+		equal(t, "users.created_at.HasDefault", mustColumn(t, users, "created_at").HasDefault, true)
 		equal(t, "users.Uniques", users.Uniques, [][]string{{"email"}})
 		equal(t, "Enums", s.Enums, []ir.Enum{})
 	})
 
 	t.Run("mysql_users", func(t *testing.T) {
-		s := parseFixture(t, "mysql_users.json", "mysql", "")
+		s := parseFixture(t, "mysql_users.hcl", "mysql", "")
+		equal(t, "Name", s.Name, "app")
 		equal(t, "tables", tableNames(s), []string{"categories", "users"})
 		users := mustTable(t, s, "users")
 		equal(t, "users.id.HasDefault", mustColumn(t, users, "id").HasDefault, true)
 		equal(t, "users.email.HasDefault", mustColumn(t, users, "email").HasDefault, false)
 		equal(t, "users.class.Nullable", mustColumn(t, users, "class").Nullable, true)
+		equal(t, "users.status", mustColumn(t, users, "status"),
+			ir.Column{DBName: "status", RawType: "enum('active','inactive','banned')", HasDefault: true})
+		equal(t, "users.Uniques", users.Uniques, [][]string{{"email"}})
 		categories := mustTable(t, s, "categories")
 		equal(t, "categories.id.HasDefault", mustColumn(t, categories, "id").HasDefault, true)
 		equal(t, "categories.name.HasDefault", mustColumn(t, categories, "name").HasDefault, false)
+		equal(t, "categories.name.RawType", mustColumn(t, categories, "name").RawType, "varchar(100)")
 		equal(t, "categories.PrimaryKey", categories.PrimaryKey, []string{"id"})
 		equal(t, "categories.id.InPK", mustColumn(t, categories, "id").InPK, true)
 	})
 
 	t.Run("typecheck_users", func(t *testing.T) {
-		s := parseFixture(t, "typecheck_users.json", "postgres", "")
+		s := parseFixture(t, "typecheck_users.hcl", "postgres", "")
 		users := mustTable(t, s, "users")
 		equal(t, "users.age.RequiredForInsert", mustColumn(t, users, "age").RequiredForInsert(), true)
 		equal(t, "users.id.RequiredForInsert", mustColumn(t, users, "id").RequiredForInsert(), false)
+		equal(t, "users.Uniques", users.Uniques, [][]string{{"email"}})
 	})
+}
 
+func TestParseHCLVariants(t *testing.T) {
 	hasDefault := []struct {
-		name   string
-		column string
-		want   bool
+		name string
+		col  string
+		want bool
 	}{
-		{"auto_increment string true", `{"name":"c","type":"int","auto_increment":"true"}`, true},
-		{"auto_increment string yes", `{"name":"c","type":"int","auto_increment":"YES"}`, true},
-		{"auto_increment string false", `{"name":"c","type":"int","auto_increment":"false"}`, false},
-		{"auto_increment bool false", `{"name":"c","type":"int","auto_increment":false}`, false},
-		{"identity object", `{"name":"c","type":"bigint","identity":{"generated":"ALWAYS"}}`, true},
-		{"identity null", `{"name":"c","type":"bigint","identity":null}`, false},
-		{"default null", `{"name":"c","type":"bigint","default":null}`, false},
-		{"default number", `{"name":"c","type":"bigint","default":0}`, true},
-		{"serial4", `{"name":"c","type":"serial4"}`, true},
-		{"SmallSerial", `{"name":"c","type":"SmallSerial"}`, true},
-		{"attr type identity", `{"name":"c","type":"bigint","attrs":[{"type":"Identity"}]}`, true},
-		{"attr @type auto_increment", `{"name":"c","type":"int","attrs":[{"@type":"mysql.AutoIncrement_auto_increment"}]}`, true},
-		{"attr name identity", `{"name":"c","type":"int","attrs":[{"name":"identity"}]}`, true},
-		{"attr auto_increment true", `{"name":"c","type":"int","attrs":[{"auto_increment":true}]}`, true},
-		{"attr unrelated", `{"name":"c","type":"int","attrs":[{"name":"collate"},"x"]}`, false},
-		{"type object auto_increment", `{"name":"c","type":{"raw":"int","auto_increment":"1"}}`, true},
-		{"plain", `{"name":"c","type":"int"}`, false},
+		{"default number", `type = integer` + "\n" + `default = 0`, true},
+		{"default string", `type = text` + "\n" + `default = "bob"`, true},
+		{"default sql", `type = timestamptz` + "\n" + `default = sql("CURRENT_TIMESTAMP")`, true},
+		{"auto_increment true", `type = int` + "\n" + `auto_increment = true`, true},
+		{"auto_increment false", `type = int` + "\n" + `auto_increment = false`, false},
+		{"identity by default", "type = bigint\nidentity {\n  generated = BY_DEFAULT\n}", true},
+		{"identity always", "type = bigint\nidentity {\n  generated = ALWAYS\n  start = 10\n}", true},
+		{"serial4", `type = serial4`, true},
+		{"smallserial", `type = smallserial`, true},
+		{"plain", `type = int`, false},
 	}
 	for _, tc := range hasDefault {
 		t.Run("has_default/"+tc.name, func(t *testing.T) {
-			s, err := Parse(inlineSchema(`{"name":"t","columns":[`+tc.column+`]}`), "mysql", "")
-			if err != nil {
-				t.Fatal(err)
-			}
+			s := mustParse(t, inlineTable("t", "column \"c\" {\nnull = false\n"+tc.col+"\n}"), "mysql")
 			equal(t, "HasDefault", s.Tables[0].Columns[0].HasDefault, tc.want)
 		})
 	}
@@ -247,41 +266,97 @@ func TestParseShapeVariants(t *testing.T) {
 		typ  string
 		want string
 	}{
-		{"string", `"text"`, "text"},
-		{"raw", `{"raw":"text"}`, "text"},
-		{"type key", `{"type":"varchar(5)"}`, "varchar(5)"},
-		{"name key", `{"name":"uuid"}`, "uuid"},
-		{"raw wins", `{"raw":"character varying(3)","type":"varchar","name":"x"}`, "character varying(3)"},
-		{"nested T", `{"T":{"raw":"jsonb"}}`, "jsonb"},
-		{"nested Type", `{"Type":"x","T":"y","raw":""}`, ""},
+		{"identifier", `integer`, "integer"},
+		{"call", `varchar(255)`, "varchar(255)"},
+		{"call two args", `numeric(10, 2)`, "numeric(10,2)"},
+		{"sql", `sql("geometry(Point,4326)")`, "geometry(Point,4326)"},
+		{"sql array", `sql("text[]")`, "text[]"},
+		{"underscore identifier", `double_precision`, "double precision"},
+		{"underscore call", `character_varying(255)`, "character varying(255)"},
+		{"bit varying", `bit_varying(8)`, "bit varying(8)"},
+		{"time precision", `timestamptz(3)`, "timestamptz(3)"},
+		{"mysql enum", `enum("a","it's")`, "enum('a','it''s')"},
+		{"interval", `interval`, "interval"},
+		{"interval field", `day_to_second`, "interval day to second"},
+		{"interval field precision", `second(3)`, "interval second(3)"},
+		{"domain reference", `domain.email_address`, "email_address"},
 	}
 	for _, tc := range rawType {
 		t.Run("raw_type/"+tc.name, func(t *testing.T) {
-			s, err := Parse(inlineSchema(`{"name":"t","columns":[{"name":"c","type":`+tc.typ+`}]}`), "postgres", "")
-			if tc.want == "" {
-				if err == nil || !strings.Contains(err.Error(), `table "t": column "c": missing type`) {
-					t.Fatalf("err = %v, want missing type", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			equal(t, "RawType", s.Tables[0].Columns[0].RawType, tc.want)
+			s := mustParse(t, inlineTable("t", "column \"c\" {\nnull = false\ntype = "+tc.typ+"\n}"), "postgres")
+			c := s.Tables[0].Columns[0]
+			equal(t, "RawType", c.RawType, tc.want)
+			equal(t, "Enum", c.Enum, "")
 		})
 	}
 
-	t.Run("primary key variants", func(t *testing.T) {
+	t.Run("interval fields are postgres-only", func(t *testing.T) {
+		s := mustParse(t, inlineTable("t", "column \"c\" {\ntype = year\n}"), "mysql")
+		equal(t, "RawType", s.Tables[0].Columns[0].RawType, "year")
+	})
+
+	t.Run("enum type", func(t *testing.T) {
+		s := mustParse(t, `
+table "t" {
+  schema = schema.public
+  column "role" {
+    null = false
+    type = enum.user_role
+  }
+  column "tags" {
+    null = true
+    type = sql("user_role[]")
+  }
+}
+enum "user_role" {
+  schema = schema.public
+  values = ["admin", "member"]
+}
+schema "public" {
+}
+`, "postgres")
+		tbl := s.Tables[0]
+		equal(t, "role", mustColumn(t, tbl, "role"), ir.Column{DBName: "role", RawType: "user_role", Enum: "user_role"})
+		equal(t, "tags", mustColumn(t, tbl, "tags"), ir.Column{DBName: "tags", RawType: "user_role[]", Nullable: true})
+		equal(t, "Enums", s.Enums, []ir.Enum{{DBName: "user_role", Values: []ir.EnumValue{{DB: "admin"}, {DB: "member"}}}})
+	})
+
+	t.Run("null", func(t *testing.T) {
+		s := mustParse(t, inlineTable("t", `
+column "a" {
+  null = true
+  type = text
+}
+column "b" {
+  null = false
+  type = text
+}
+column "c" {
+  type = text
+}`), "postgres")
+		tbl := s.Tables[0]
+		equal(t, "a.Nullable", mustColumn(t, tbl, "a").Nullable, true)
+		equal(t, "b.Nullable", mustColumn(t, tbl, "b").Nullable, false)
+		equal(t, "c.Nullable", mustColumn(t, tbl, "c").Nullable, false)
+	})
+
+	t.Run("primary key forms", func(t *testing.T) {
 		for _, pk := range []string{
-			`{"columns":["a","b"]}`,
-			`{"columns":[{"name":"a"},{"column":"b"}]}`,
-			`{"columns":[{"c":"a"},{"column":{"name":"b"}}]}`,
-			`{"parts":[{"column":"a"},{"c":{"name":"b"}}]}`,
+			"primary_key {\n  columns = [column.a, column.b]\n}",
+			"primary_key {\n  on {\n    column = column.a\n  }\n  on {\n    desc = true\n    column = column.b\n  }\n}",
 		} {
-			s, err := Parse(inlineSchema(`{"name":"t","columns":[{"name":"a","type":"int"},{"name":"b","type":"int"},{"name":"x","type":"int","null":true}],"primary_key":`+pk+`}`), "postgres", "")
-			if err != nil {
-				t.Fatalf("%s: %v", pk, err)
-			}
+			s := mustParse(t, inlineTable("t", `
+column "a" {
+  type = int
+}
+column "b" {
+  type = int
+}
+column "x" {
+  null = true
+  type = int
+}
+`+pk), "postgres")
 			tbl := s.Tables[0]
 			equal(t, pk+" PrimaryKey", tbl.PrimaryKey, []string{"a", "b"})
 			equal(t, pk+" a.InPK", mustColumn(t, tbl, "a").InPK, true)
@@ -290,101 +365,380 @@ func TestParseShapeVariants(t *testing.T) {
 	})
 
 	t.Run("no primary key", func(t *testing.T) {
-		s, err := Parse(inlineSchema(`{"name":"t","columns":[{"name":"a","type":"int"}]}`), "postgres", "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustParse(t, inlineTable("t", "column \"a\" {\ntype = int\n}"), "postgres")
 		equal(t, "PrimaryKey", s.Tables[0].PrimaryKey, []string{})
 	})
 
 	t.Run("nullable pk column is not nullable", func(t *testing.T) {
-		s, err := Parse(inlineSchema(`{"name":"t","columns":[{"name":"a","type":"TEXT","null":true}],"primary_key":{"columns":["a"]}}`), "sqlite", "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustParse(t, inlineTable("t", "column \"a\" {\nnull = true\ntype = text\n}\nprimary_key {\ncolumns = [column.a]\n}"), "sqlite")
 		equal(t, "a.Nullable", s.Tables[0].Columns[0].Nullable, false)
 	})
 
-	t.Run("index variants", func(t *testing.T) {
-		s, err := Parse(inlineSchema(`{"name":"t",
-			"columns":[{"name":"a","type":"int"},{"name":"b","type":"int"}],
-			"indexes":[
-				{"name":"i1","unique":true,"columns":["a","b"]},
-				{"name":"i2","unique":true,"parts":["b"]},
-				{"name":"i3","unique":true,"parts":[{"name":"a"}]},
-				{"name":"i4","unique":true,"parts":[{"c":"b"},{"x":"lower(a)"}]},
-				{"name":"i5","unique":true,"parts":[{"column":"a"}],"where":null},
-				{"name":"i6","unique":true,"parts":[{"column":"a"}],"where":"a > 0"},
-				{"name":"i7","parts":[{"column":"a"}]},
-				{"unique":true,"parts":[{"column":{"name":"b"}}]}
-			]}`), "postgres", "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		equal(t, "Uniques", s.Tables[0].Uniques, [][]string{{"a", "b"}, {"b"}, {"a"}, {"a"}, {"b"}})
+	t.Run("uniques", func(t *testing.T) {
+		s := mustParse(t, inlineTable("t", `
+column "a" {
+  type = int
+}
+column "b" {
+  type = int
+}
+index "i_columns" {
+  unique  = true
+  columns = [column.a, column.b]
+}
+index "i_on" {
+  unique = true
+  on {
+    column = column.a
+  }
+  on {
+    column = column.b
+  }
+}
+index "i_desc" {
+  unique = true
+  on {
+    desc   = true
+    column = column.b
+  }
+}
+index "i_expr" {
+  unique = true
+  on {
+    expr = "lower(a)"
+  }
+}
+index "i_mixed" {
+  unique = true
+  on {
+    column = column.b
+  }
+  on {
+    expr = "a + 1"
+  }
+}
+index "i_where" {
+  unique  = true
+  columns = [column.a]
+  where   = "a > 0"
+}
+index "i_not_unique" {
+  columns = [column.a]
+}
+index "i_unique_false" {
+  unique  = false
+  columns = [column.b]
+}
+index "i_bracket" {
+  unique  = true
+  columns = [column["a"]]
+}
+unique "u_constraint" {
+  columns = [column.b]
+}`), "postgres")
+		equal(t, "Uniques", s.Tables[0].Uniques, [][]string{{"a", "b"}, {"a", "b"}, {"b"}, {"a"}, {"b"}})
 	})
 
-	t.Run("foreign key variants", func(t *testing.T) {
-		s, err := Parse([]byte(`{"schemas":[{"name":"main","tables":[
-			{"name":"parents","columns":[{"name":"id","type":"int"}]},
-			{"name":"children","columns":[{"name":"p","type":"int"}],"foreign_keys":[
-				{"symbol":"fk_sym","columns":["p"],"referenced_columns":["id"],"referenced_table":"parents"},
-				{"columns":["p"],"ref":{"table":{"name":"parents"},"columns":["id"]}},
-				{"name":"fk_ref_string","columns":["p"],"ref_columns":["id"],"ref":"parents"},
-				{"name":"fk_qualified","columns":["p"],"ref_columns":["id"],"ref_table":"other.parents"},
-				{"name":"fk_schema_string","columns":["p"],"ref_columns":["id"],"ref_table":{"name":"parents","schema":"other"}},
-				{"name":"fk_nested","columns":["p"],"ref_columns":["id"],"table":{"table":{"name":"parents"}}},
-				{"name":"fk_references","columns":["p"],"references":{"table":"parents","columns":["id"]}}
-			]}]}]}`), "postgres", "")
-		if err != nil {
-			t.Fatal(err)
-		}
+	t.Run("foreign keys", func(t *testing.T) {
+		s := mustParse(t, inlineTables(`
+table "parents" {
+  schema = schema.main
+  column "id" {
+    type = int
+  }
+  column "2fa" {
+    type = int
+  }
+}
+table "children" {
+  schema = schema.main
+  column "id" {
+    type = int
+  }
+  column "p" {
+    type = int
+  }
+  column "q" {
+    type = int
+  }
+  foreign_key "fk_parent" {
+    columns     = [column.p]
+    ref_columns = [table.parents.column.id]
+    on_update   = NO_ACTION
+    on_delete   = CASCADE
+  }
+  foreign_key "fk_pair" {
+    columns     = [column.p, column.q]
+    ref_columns = [table.parents.column.id, table.parents.column["2fa"]]
+  }
+  foreign_key "fk_self" {
+    columns     = [column.q]
+    ref_columns = [column.id]
+  }
+  foreign_key "fk_qualified_self_schema" {
+    columns     = [column.p]
+    ref_columns = [table.main.parents.column.id]
+  }
+}`), "postgres")
 		children := mustTable(t, s, "children")
-		fk := func(sym, schema string) ir.ForeignKey {
-			return ir.ForeignKey{Symbol: sym, Columns: []string{"p"}, RefSchema: schema, RefTable: "parents", RefColumns: []string{"id"}}
-		}
 		equal(t, "children.ForeignKeys", children.ForeignKeys, []ir.ForeignKey{
-			fk("fk_sym", ""),
-			fk("fk_p_parents", ""),
-			fk("fk_ref_string", ""),
-			fk("fk_qualified", "other"),
-			fk("fk_schema_string", "other"),
-			fk("fk_nested", ""),
-			fk("fk_references", ""),
+			{Symbol: "fk_parent", Columns: []string{"p"}, RefTable: "parents", RefColumns: []string{"id"}},
+			{Symbol: "fk_pair", Columns: []string{"p", "q"}, RefTable: "parents", RefColumns: []string{"id", "2fa"}},
+			{Symbol: "fk_self", Columns: []string{"q"}, RefTable: "children", RefColumns: []string{"id"}},
+			{Symbol: "fk_qualified_self_schema", Columns: []string{"p"}, RefTable: "parents", RefColumns: []string{"id"}},
 		})
 	})
 
-	t.Run("enum detection", func(t *testing.T) {
-		s, err := Parse([]byte(`{"schemas":[{"name":"public",
-			"enums":[{"name":"Mood","values":["happy","sad"]},{"name":"empty_enum","values":[]}],
-			"tables":[{"name":"t","columns":[
-				{"name":"a","type":"Mood"},
-				{"name":"b","type":"public.mood"},
-				{"name":"c","type":"mood[]"},
-				{"name":"d","type":"text"},
-				{"name":"e","type":"empty_enum"}
-			]}]}]}`), "postgres", "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		tbl := s.Tables[0]
-		equal(t, "a.Enum", mustColumn(t, tbl, "a").Enum, "Mood")
-		equal(t, "b.Enum", mustColumn(t, tbl, "b").Enum, "Mood")
-		equal(t, "c.Enum", mustColumn(t, tbl, "c").Enum, "")
-		equal(t, "d.Enum", mustColumn(t, tbl, "d").Enum, "")
-		equal(t, "e.Enum", mustColumn(t, tbl, "e").Enum, "empty_enum")
-		equal(t, "Enums", s.Enums, []ir.Enum{
-			{DBName: "Mood", Values: []ir.EnumValue{{DB: "happy"}, {DB: "sad"}}},
-			{DBName: "empty_enum", Values: []ir.EnumValue{}},
-		})
+	t.Run("ignored blocks and attributes", func(t *testing.T) {
+		s := mustParse(t, `
+table "t" {
+  schema  = schema.public
+  comment = "a table"
+  column "a" {
+    null    = false
+    type    = int
+    comment = "a column"
+  }
+  check "positive" {
+    expr = "(a > 0)"
+  }
+}
+view "v" {
+  schema = schema.public
+  column "a" {
+    type = int
+  }
+  as = "SELECT a FROM t"
+}
+sequence "s" {
+  schema = schema.public
+}
+function "f" {
+  schema = schema.public
+}
+extension "citext" {
+  schema = schema.public
+}
+schema "public" {
+  comment = "standard public schema"
+}
+`, "postgres")
+		equal(t, "tables", tableNames(s), []string{"t"})
 	})
 }
 
+func TestParseRejectsJSON(t *testing.T) {
+	for _, in := range []string{`{"schemas":[]}`, " \n\t{}"} {
+		s, err := Parse([]byte(in), "postgres", "")
+		if err == nil {
+			t.Fatalf("Parse(%q) succeeded with %#v, want error", in, s)
+		}
+		for _, want := range []string{"input looks like JSON", "atlas schema inspect", "--format"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err, want)
+			}
+		}
+	}
+}
+
+func TestParseSyntaxError(t *testing.T) {
+	_, err := Parse([]byte("schema \"main\" {\n}\ntable \"t\" {"), "postgres", "")
+	if err == nil {
+		t.Fatal("Parse succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "schema.hcl:3:") {
+		t.Errorf("error %q does not contain file:line:col %q", err, "schema.hcl:3:")
+	}
+}
+
+func TestParseRefSchemaNormalized(t *testing.T) {
+	// Atlas qualifies table labels and references with the schema when two
+	// schemas hold a table with the same name.
+	src := `
+table "audit" "users" {
+  schema = schema.audit
+  column "id" {
+    null = false
+    type = bigint
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+table "public" "users" {
+  schema = schema.public
+  column "id" {
+    null = false
+    type = bigint
+  }
+  column "a" {
+    null = false
+    type = bigint
+  }
+  column "b" {
+    null = false
+    type = bigint
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "self" {
+    columns     = [column.a]
+    ref_columns = [table.public.users.column.id]
+  }
+  foreign_key "x" {
+    columns     = [column.b]
+    ref_columns = [table.audit.users.column.id]
+  }
+}
+schema "audit" {
+}
+schema "public" {
+}
+`
+	s, err := Parse([]byte(src), "postgres", "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal(t, "tables", tableNames(s), []string{"users"})
+	equal(t, "users.ForeignKeys", s.Tables[0].ForeignKeys, []ir.ForeignKey{
+		{Symbol: "self", Columns: []string{"a"}, RefSchema: "", RefTable: "users", RefColumns: []string{"id"}},
+		{Symbol: "x", Columns: []string{"b"}, RefSchema: "audit", RefTable: "users", RefColumns: []string{"id"}},
+	})
+
+	audit, err := Parse([]byte(src), "postgres", "audit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal(t, "audit users columns", len(audit.Tables[0].Columns), 1)
+
+	// An unqualified reference to a table of another schema (multi_schema.hcl).
+	public := parseFixture(t, "multi_schema.hcl", "postgres", "public")
+	equal(t, "events.ForeignKeys", mustTable(t, public, "events").ForeignKeys, []ir.ForeignKey{{
+		Symbol:     "events_log_id_fkey",
+		Columns:    []string{"log_id"},
+		RefSchema:  "audit",
+		RefTable:   "logs",
+		RefColumns: []string{"id"},
+	}})
+}
+
+func TestParseEnumExactMatch(t *testing.T) {
+	s := mustParse(t, `
+table "t" {
+  schema = schema.public
+  column "a" {
+    null = false
+    type = enum.mood
+  }
+  column "b" {
+    null = false
+    type = enum.Mood
+  }
+  column "c" {
+    null = false
+    type = enum.public.mood
+  }
+  column "d" {
+    null = false
+    type = text
+  }
+}
+enum "Mood" {
+  schema = schema.public
+  values = ["HAPPY"]
+}
+enum "mood" {
+  schema = schema.public
+  values = ["happy", "sad"]
+}
+enum "empty_enum" {
+  schema = schema.public
+  values = []
+}
+schema "public" {
+}
+`, "postgres")
+	tbl := s.Tables[0]
+	equal(t, "a.Enum", mustColumn(t, tbl, "a").Enum, "mood")
+	equal(t, "b.Enum", mustColumn(t, tbl, "b").Enum, "Mood")
+	equal(t, "c.Enum", mustColumn(t, tbl, "c").Enum, "mood")
+	equal(t, "d.Enum", mustColumn(t, tbl, "d").Enum, "")
+	equal(t, "Enums", s.Enums, []ir.Enum{
+		{DBName: "Mood", Values: []ir.EnumValue{{DB: "HAPPY"}}},
+		{DBName: "mood", Values: []ir.EnumValue{{DB: "happy"}, {DB: "sad"}}},
+		{DBName: "empty_enum", Values: []ir.EnumValue{}},
+	})
+}
+
+func TestParseEnumsOfOtherSchemas(t *testing.T) {
+	src := `
+table "t" {
+  schema = schema.public
+  column "local" {
+    null = false
+    type = enum.public.mood
+  }
+  column "foreign" {
+    null = false
+    type = enum.audit.mood
+  }
+  column "unique_foreign" {
+    null = false
+    type = enum.level
+  }
+}
+enum "audit" "mood" {
+  schema = schema.audit
+  values = ["a"]
+}
+enum "level" {
+  schema = schema.audit
+  values = ["low"]
+}
+enum "public" "mood" {
+  schema = schema.public
+  values = ["b"]
+}
+schema "audit" {
+}
+schema "public" {
+}
+`
+	s, err := Parse([]byte(src), "postgres", "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal(t, "Enums", s.Enums, []ir.Enum{{DBName: "mood", Values: []ir.EnumValue{{DB: "b"}}}})
+	tbl := s.Tables[0]
+	equal(t, "local", mustColumn(t, tbl, "local"), ir.Column{DBName: "local", RawType: "mood", Enum: "mood"})
+	// An enum of another schema is not part of the IR: the column keeps the
+	// qualified type name and no Enum.
+	equal(t, "foreign", mustColumn(t, tbl, "foreign"), ir.Column{DBName: "foreign", RawType: "audit.mood"})
+	equal(t, "unique_foreign", mustColumn(t, tbl, "unique_foreign"), ir.Column{DBName: "unique_foreign", RawType: "audit.level"})
+}
+
 func TestParsePGTypes(t *testing.T) {
-	s := parseFixture(t, "pg_types.json", "postgres", "")
+	s := parseFixture(t, "pg_types.hcl", "postgres", "")
 	tbl := mustTable(t, s, "t")
-	equal(t, "c_double_precision.RawType", mustColumn(t, tbl, "c_double_precision").RawType, "double precision")
-	equal(t, "tags.RawType", mustColumn(t, tbl, "tags").RawType, "text[]")
+	want := map[string]string{
+		"c_smallint": "smallint", "c_int2": "int2", "c_smallserial": "smallserial",
+		"c_integer": "integer", "c_int": "int", "c_int4": "int4", "c_serial": "serial",
+		"c_bigint": "bigint", "c_int8": "int8", "c_bigserial": "bigserial",
+		"c_real": "real", "c_float4": "float4", "c_double_precision": "double precision", "c_float8": "float8",
+		"c_numeric": "numeric", "c_decimal": "decimal", "c_money": "money", "c_boolean": "boolean",
+		"c_text": "text", "c_varchar": "varchar", "c_char": "char", "c_citext": "citext",
+		"c_inet": "inet", "c_cidr": "cidr", "c_macaddr": "macaddr", "c_bytea": "bytea", "c_uuid": "uuid",
+		"c_date": "date", "c_timestamp": "timestamp", "c_timestamptz": "timestamptz",
+		"c_time": "time", "c_timetz": "timetz", "c_interval": "interval",
+		"c_json": "json", "c_jsonb": "jsonb", "tags": "text[]", "role": "user_role", "nullable_int": "integer",
+	}
+	equal(t, "column count", len(tbl.Columns), len(want))
+	for _, c := range tbl.Columns {
+		if w, ok := want[c.DBName]; !ok || c.RawType != w {
+			t.Errorf("%s.RawType = %q, want %q", c.DBName, c.RawType, w)
+		}
+	}
 	equal(t, "tags.Enum", mustColumn(t, tbl, "tags").Enum, "")
 	equal(t, "role.Enum", mustColumn(t, tbl, "role").Enum, "user_role")
 	equal(t, "nullable_int", mustColumn(t, tbl, "nullable_int"), ir.Column{DBName: "nullable_int", RawType: "integer", Nullable: true})
@@ -395,7 +749,7 @@ func TestParsePGTypes(t *testing.T) {
 }
 
 func TestParseComposite(t *testing.T) {
-	s := parseFixture(t, "composite.json", "postgres", "")
+	s := parseFixture(t, "composite.hcl", "postgres", "")
 	equal(t, "tables", tableNames(s), []string{"membership_notes", "memberships", "orgs", "users"})
 
 	orgs := mustTable(t, s, "orgs")
@@ -406,11 +760,15 @@ func TestParseComposite(t *testing.T) {
 	equal(t, "memberships.org_id.InPK", mustColumn(t, m, "org_id").InPK, true)
 	equal(t, "memberships.user_id.InPK", mustColumn(t, m, "user_id").InPK, true)
 	equal(t, "memberships.slug.InPK", mustColumn(t, m, "slug").InPK, false)
+	equal(t, "memberships.role.HasDefault", mustColumn(t, m, "role").HasDefault, true)
 	equal(t, "memberships.org_id.RequiredForInsert", mustColumn(t, m, "org_id").RequiredForInsert(), true)
 	// Only the plain 2-column unique index qualifies: the expression index,
 	// the partial index and the non-unique index are excluded.
 	equal(t, "memberships.Uniques", m.Uniques, [][]string{{"org_id", "slug"}})
-	equal(t, "memberships FK count", len(m.ForeignKeys), 2)
+	equal(t, "memberships.ForeignKeys", m.ForeignKeys, []ir.ForeignKey{
+		{Symbol: "memberships_org_id_fkey", Columns: []string{"org_id"}, RefTable: "orgs", RefColumns: []string{"id"}},
+		{Symbol: "memberships_user_id_fkey", Columns: []string{"user_id"}, RefTable: "users", RefColumns: []string{"id"}},
+	})
 
 	notes := mustTable(t, s, "membership_notes")
 	equal(t, "membership_notes.ForeignKeys", notes.ForeignKeys, []ir.ForeignKey{{
@@ -422,15 +780,16 @@ func TestParseComposite(t *testing.T) {
 }
 
 func TestParseSQLiteRowidAlias(t *testing.T) {
-	s := parseFixture(t, "sqlite_types.json", "sqlite", "")
+	s := parseFixture(t, "sqlite_types.hcl", "sqlite", "")
 	things := mustTable(t, s, "things")
-	id := mustColumn(t, things, "id")
-	equal(t, "things.id", id, ir.Column{DBName: "id", RawType: "INTEGER", HasDefault: true, InPK: true})
+	// Atlas prints the rowid alias with null = true and no auto_increment.
+	equal(t, "things.id", mustColumn(t, things, "id"), ir.Column{DBName: "id", RawType: "integer", HasDefault: true, InPK: true})
 	for _, name := range []string{"created_at", "active", "code", "rank", "price"} {
 		equal(t, "things."+name+".HasDefault", mustColumn(t, things, name).HasDefault, false)
 	}
-	equal(t, "things.extra.Nullable", mustColumn(t, things, "extra").Nullable, true)
-	equal(t, "things.price.RawType", mustColumn(t, things, "price").RawType, "NUMERIC(10,2)")
+	equal(t, "things.extra", mustColumn(t, things, "extra"), ir.Column{DBName: "extra", RawType: "FOO", Nullable: true})
+	equal(t, "things.price.RawType", mustColumn(t, things, "price").RawType, "numeric(10,2)")
+	equal(t, "things.code.RawType", mustColumn(t, things, "code").RawType, "varchar(10)")
 
 	// Composite INTEGER PKs and non-INTEGER single-column PKs are not rowid aliases.
 	pairs := mustTable(t, s, "pairs")
@@ -439,38 +798,29 @@ func TestParseSQLiteRowidAlias(t *testing.T) {
 	equal(t, "codes.id.HasDefault", mustColumn(t, codes, "id").HasDefault, false)
 
 	// The rule is SQLite-only.
-	pg := parseFixture(t, "sqlite_types.json", "postgres", "")
+	pg := parseFixture(t, "sqlite_types.hcl", "postgres", "")
 	equal(t, "postgres things.id.HasDefault", mustColumn(t, mustTable(t, pg, "things"), "id").HasDefault, false)
 }
 
 func TestParseSchemaSelection(t *testing.T) {
-	s := parseFixture(t, "multi_schema.json", "postgres", "")
-	equal(t, "default Name", s.Name, "public")
-	equal(t, "default tables", tableNames(s), []string{"events"})
-	equal(t, "events.ForeignKeys", mustTable(t, s, "events").ForeignKeys, []ir.ForeignKey{{
-		Symbol:     "events_log_id_fkey",
-		Columns:    []string{"log_id"},
-		RefSchema:  "audit",
-		RefTable:   "logs",
-		RefColumns: []string{"id"},
-	}})
+	// Atlas prints schema blocks last, ordered by name, so "audit" comes first.
+	s := parseFixture(t, "multi_schema.hcl", "postgres", "")
+	equal(t, "default Name", s.Name, "audit")
+	equal(t, "default tables", tableNames(s), []string{"logs"})
 
-	audit := parseFixture(t, "multi_schema.json", "postgres", "audit")
+	audit := parseFixture(t, "multi_schema.hcl", "postgres", "audit")
 	equal(t, "audit Name", audit.Name, "audit")
 	equal(t, "audit tables", tableNames(audit), []string{"logs"})
 
-	public := parseFixture(t, "multi_schema.json", "postgres", "public")
+	public := parseFixture(t, "multi_schema.hcl", "postgres", "public")
+	equal(t, "public Name", public.Name, "public")
 	equal(t, "public tables", tableNames(public), []string{"events"})
 
-	data, err := os.ReadFile(filepath.Join("..", "testdata", "atlas", "multi_schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = Parse(data, "postgres", "nope")
+	_, err := Parse(readFixture(t, "multi_schema.hcl"), "postgres", "nope")
 	if err == nil {
 		t.Fatal("Parse with unknown schema: want error")
 	}
-	for _, want := range []string{`schema "nope" not found`, `available: public, audit`} {
+	for _, want := range []string{`schema "nope" not found`, `available: audit, public`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
@@ -478,31 +828,46 @@ func TestParseSchemaSelection(t *testing.T) {
 }
 
 func TestParseErrors(t *testing.T) {
+	col := func(name string) string { return "column \"" + name + "\" {\n  type = int\n}\n" }
 	tests := []struct {
 		name       string
 		data       string
 		schemaName string
-		want       []string
+		want       string
 	}{
-		{"invalid json", `{"schemas": [`, "", []string{"invalid atlas json"}},
-		{"root not object", `[]`, "", []string{"invalid atlas json"}},
-		{"empty schemas", `{"schemas": []}`, "", []string{"no schemas"}},
-		{"missing schemas", `{}`, "", []string{"no schemas"}},
-		{"no tables", `{"schemas":[{"name":"x"}]}`, "", []string{`schema "x" has no tables`}},
-		{"no tables selected", `{"schemas":[{"name":"a","tables":[{"name":"t","columns":[{"name":"c","type":"int"}]}]},{"name":"x","tables":[]}]}`, "x", []string{`schema "x" has no tables`}},
-		{"enum without name", `{"schemas":[{"name":"x","enums":[{"values":["a"]}],"tables":[{"name":"t","columns":[{"name":"c","type":"int"}]}]}]}`, "", []string{"enum at index 0 has no name"}},
-		{"table without name", inlineSchema2(`{"columns":[{"name":"c","type":"int"}]}`), "", []string{"table at index 0 has no name"}},
-		{"column without name", inlineSchema2(`{"name":"users","columns":[{"name":"a","type":"int"},{"type":"int"}]}`), "", []string{`table "users": column at index 1 has no name`}},
-		{"column without type", inlineSchema2(`{"name":"users","columns":[{"name":"age"}]}`), "", []string{`table "users": column "age": missing type`}},
-		{"duplicate column", inlineSchema2(`{"name":"users","columns":[{"name":"a","type":"int"},{"name":"a","type":"int"}]}`), "", []string{`table "users": duplicate column "a"`}},
-		{"duplicate table", inlineSchema2(`{"name":"users","columns":[{"name":"a","type":"int"}]},{"name":"users","columns":[{"name":"a","type":"int"}]}`), "", []string{`duplicate table "users"`}},
-		{"pk unknown column", inlineSchema2(`{"name":"users","columns":[{"name":"id","type":"int"}],"primary_key":{"columns":["uid"]}}`), "", []string{`table "users": primary key: unknown column "uid"`}},
-		{"pk bad reference", inlineSchema2(`{"name":"users","columns":[{"name":"id","type":"int"}],"primary_key":{"columns":[{"x":"id+1"}]}}`), "", []string{`table "users": primary key: unrecognized column reference`}},
-		{"fk unknown column", inlineSchema2(`{"name":"posts","columns":[{"name":"user_id","type":"int"}],"foreign_keys":[{"name":"posts_fk","columns":["author_id"],"ref_columns":["id"],"ref_table":"users"}]}`), "", []string{`table "posts": foreign key "posts_fk": unknown column "author_id"`}},
-		{"fk without ref table", inlineSchema2(`{"name":"posts","columns":[{"name":"user_id","type":"int"}],"foreign_keys":[{"name":"posts_fk","columns":["user_id"],"ref_columns":["id"]}]}`), "", []string{`table "posts": foreign key "posts_fk": missing referenced table`}},
-		{"fk without columns", inlineSchema2(`{"name":"posts","columns":[{"name":"user_id","type":"int"}],"foreign_keys":[{"name":"posts_fk","ref_columns":["id"],"ref_table":"users"}]}`), "", []string{`table "posts": foreign key "posts_fk": missing columns`}},
-		{"fk column count mismatch", inlineSchema2(`{"name":"posts","columns":[{"name":"user_id","type":"int"}],"foreign_keys":[{"name":"posts_fk","columns":["user_id"],"ref_columns":["id","x"],"ref_table":"users"}]}`), "", []string{`table "posts": foreign key "posts_fk": 1 columns reference 2 columns`}},
-		{"unique unknown column", inlineSchema2(`{"name":"users","columns":[{"name":"id","type":"int"}],"indexes":[{"name":"u","unique":true,"columns":["email"]}]}`), "", []string{`table "users": index "u": unknown column "email"`}},
+		{"empty input", ``, "", "atlas hcl has no schemas"},
+		{"no schema blocks", `table "t" {` + "\n" + `schema = schema.main` + "\n}", "", "atlas hcl has no schemas"},
+		{"no tables", `schema "x" {` + "\n}", "", `schema "x" has no tables`},
+		{"no tables selected", inlineTable("t", col("c")) + "schema \"x\" {\n}\n", "x", `schema "x" has no tables`},
+		{"enum without name", inlineTable("t", col("c")) + "enum \"\" {\nschema = schema.main\nvalues = [\"a\"]\n}", "", "enum at index 0 has no name"},
+		{"enum values not strings", inlineTable("t", col("c")) + "enum \"e\" {\nschema = schema.main\nvalues = [1]\n}", "", `enum "e": values must be a list of strings`},
+		{"enum values missing", inlineTable("t", col("c")) + "enum \"e\" {\nschema = schema.main\n}", "", `enum "e": values must be a list of strings`},
+		{"duplicate enum", inlineTable("t", col("c")) + "enum \"e\" {\nschema = schema.main\nvalues = []\n}\nenum \"e\" {\nschema = schema.main\nvalues = []\n}", "", `duplicate enum "e"`},
+		{"enum without schema", inlineTable("t", col("c")) + "enum \"e\" {\nvalues = []\n}", "", `enum "e": missing schema reference`},
+		{"table without name", inlineTables("table {\nschema = schema.main\n" + col("c") + "}"), "", "table at index 0 has no name"},
+		{"table without schema", inlineTables("table \"users\" {\n" + col("c") + "}"), "", `table "users": missing schema reference`},
+		{"table bad schema ref", inlineTables("table \"users\" {\nschema = \"main\"\n" + col("c") + "}"), "", `table "users": schema: expected a reference like schema.<name>`},
+		{"column without name", inlineTable("users", col("a")+"column \"\" {\ntype = int\n}"), "", `table "users": column at index 1 has no name`},
+		{"column without type", inlineTable("users", "column \"age\" {\nnull = false\n}"), "", `table "users": column "age": missing type`},
+		{"column bad type", inlineTable("users", "column \"age\" {\ntype = \"int\"\n}"), "", `table "users": column "age": unsupported type expression`},
+		{"column bad type arg", inlineTable("users", "column \"age\" {\ntype = varchar(n)\n}"), "", `table "users": column "age": unsupported type expression`},
+		{"column bad null", inlineTable("users", "column \"age\" {\ntype = int\nnull = \"yes\"\n}"), "", `table "users": column "age": null:`},
+		{"column unknown enum", inlineTable("users", "column \"r\" {\ntype = enum.role\n}"), "", `table "users": column "r": unknown enum "role"`},
+		{"duplicate column", inlineTable("users", col("a")+col("a")), "", `table "users": duplicate column "a"`},
+		{"duplicate table", inlineTables("table \"users\" {\nschema = schema.main\n" + col("a") + "}\ntable \"users\" {\nschema = schema.main\n" + col("a") + "}"), "", `duplicate table "users"`},
+		{"pk unknown column", inlineTable("users", col("id")+"primary_key {\ncolumns = [column.uid]\n}"), "", `table "users": primary key: unknown column "uid"`},
+		{"pk bad reference", inlineTable("users", col("id")+"primary_key {\non {\nexpr = \"id + 1\"\n}\n}"), "", `table "users": primary key: unrecognized column reference`},
+		{"pk bad columns", inlineTable("users", col("id")+"primary_key {\ncolumns = [\"id\"]\n}"), "", `table "users": primary key: unrecognized column reference`},
+		{"fk unknown column", inlineTable("posts", col("user_id")+"foreign_key \"posts_fk\" {\ncolumns = [column.author_id]\nref_columns = [table.users.column.id]\n}"), "", `table "posts": foreign key "posts_fk": unknown column "author_id"`},
+		{"fk without ref columns", inlineTable("posts", col("user_id")+"foreign_key \"posts_fk\" {\ncolumns = [column.user_id]\n}"), "", `table "posts": foreign key "posts_fk": missing referenced columns`},
+		{"fk bad ref column", inlineTable("posts", col("user_id")+"foreign_key \"posts_fk\" {\ncolumns = [column.user_id]\nref_columns = [users.id]\n}"), "", `table "posts": foreign key "posts_fk": unrecognized referenced column`},
+		{"fk ref columns span tables", inlineTable("posts", col("a")+col("b")+"foreign_key \"posts_fk\" {\ncolumns = [column.a, column.b]\nref_columns = [table.users.column.id, table.orgs.column.id]\n}"), "", `table "posts": foreign key "posts_fk": referenced columns must belong to one table`},
+		{"fk without columns", inlineTable("posts", col("user_id")+"foreign_key \"posts_fk\" {\nref_columns = [table.users.column.id]\n}"), "", `table "posts": foreign key "posts_fk": missing columns`},
+		{"fk bad column", inlineTable("posts", col("user_id")+"foreign_key \"posts_fk\" {\ncolumns = [lower(user_id)]\nref_columns = [table.users.column.id]\n}"), "", `table "posts": foreign key "posts_fk": unrecognized column reference`},
+		{"fk column count mismatch", inlineTable("posts", col("user_id")+"foreign_key \"posts_fk\" {\ncolumns = [column.user_id]\nref_columns = [table.users.column.id, table.users.column.x]\n}"), "", `table "posts": foreign key "posts_fk": 1 columns reference 2 columns`},
+		{"unique unknown column", inlineTable("users", col("id")+"index \"u\" {\nunique = true\ncolumns = [column.email]\n}"), "", `table "users": index "u": unknown column "email"`},
+		{"unique block unknown column", inlineTable("users", col("id")+"unique \"u\" {\ncolumns = [column.email]\n}"), "", `table "users": unique "u": unknown column "email"`},
+		{"unique bad flag", inlineTable("users", col("id")+"index \"u\" {\nunique = \"yes\"\ncolumns = [column.id]\n}"), "", `table "users": index "u": unique:`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -513,15 +878,9 @@ func TestParseErrors(t *testing.T) {
 			if s != nil {
 				t.Errorf("Parse returned a schema alongside error %v", err)
 			}
-			for _, want := range tc.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not contain %q", err, want)
-				}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not contain %q", err, tc.want)
 			}
 		})
 	}
-}
-
-func inlineSchema2(tablesJSON string) string {
-	return string(inlineSchema(tablesJSON))
 }

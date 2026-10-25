@@ -57,7 +57,7 @@ func wantContains(t *testing.T, msg string, subs ...string) {
 }
 
 func TestApplyFixture(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "testdata", "atlas", "postgres_users.json"))
+	data, err := os.ReadFile(filepath.Join("..", "testdata", "atlas", "postgres_users.hcl"))
 	if err != nil {
 		t.Fatal(err)
 	}

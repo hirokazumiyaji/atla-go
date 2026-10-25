@@ -3,7 +3,7 @@
 // and mapper stages fill the Go-facing fields.
 package ir
 
-// Schema is one database schema selected from the Atlas JSON.
+// Schema is one database schema selected from the Atlas inspect HCL.
 type Schema struct {
 	Name    string  `json:"name"`
 	Dialect string  `json:"dialect"`
@@ -83,7 +83,7 @@ const (
 type ForeignKey struct {
 	Symbol     string   `json:"symbol"`
 	Columns    []string `json:"columns"`
-	RefSchema  string   `json:"ref_schema"` // "" unless Atlas qualifies the referenced table
+	RefSchema  string   `json:"ref_schema"` // "" when the referenced table is in this schema
 	RefTable   string   `json:"ref_table"`
 	RefColumns []string `json:"ref_columns"`
 }
