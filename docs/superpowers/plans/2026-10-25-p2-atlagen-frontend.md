@@ -48,10 +48,11 @@ Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then show
    - Splitting: `naming.Pascal` splits on every non-ASCII-alphanumeric rune and on camelCase boundaries.
    - Leading digit: a result that starts with a digit gets the prefix `X` (`Pascal("2fa_codes")` = `X2faCodes`; the table's model, after singularization, is `X2faCode`).
    - Enum values: an enum value whose Pascal form is empty becomes `Empty`.
-6. **Reserved table-package names:** Go keywords, predeclared identifiers, `atla`, `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context`, and the root package name. Any of these gets the suffix `tbl`. This extends the spec's list with the packages that generated files import.
+6. **Reserved table-package names:** Go keywords, predeclared identifiers, `atla`, `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context`, `main`, `internal`, `vendor`, and the root package name. Any of these gets the suffix `tbl`. This extends the spec's list with the packages that generated files import and the directory names the Go toolchain will not import as an ordinary package.
 7. **Root-package identifier collisions are generation errors.**
    - Reserved names: `Client`, `NewClient`, `Dialect`.
    - Each model reserves itself plus `<Model>Edges`, `<Model>Insert`, `<Model>Update`, `<Model>Query`, `<Model>Repo`, `<Model>Table`, `<Model>Key`.
+   - Models become fields of `Client`, so a model named `Tx` collides with the `Client.Tx` method and is an error.
    - Duplicate column Go names within a table, duplicate package names, and enum identifier clashes (type names plus constants) are also errors.
 8. **`names.tables` override keys must match a table.** An unused key is an error, as in atla. Override values must be exported Go identifiers.
 9. **`types:` overrides for a DB type absent from the schema produce a warning.** `columns:` overrides naming an unknown `table.column` produce an error.
@@ -70,6 +71,7 @@ Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then show
 14. **Relative paths.**
     - Values from `atlagen.yaml` (a schema file path, a relative `file://` URL, `out`) resolve against the config file's directory, and the `atlas` subprocess runs with that directory as its working directory.
     - Values from flags resolve against the current working directory.
+    - A relative SQLite path in `dev_url` / `--dev-url` resolves against the directory of its own source and is then made absolute, because the atlas subprocess has one working directory.
 15. **`--dev-url` without an Atlas URL in `--schema`** is a usage error.
 16. **Unsupported dialects:** `mysql` and `tidb` fail with `dialect "mysql" is not supported yet`. Any other value fails with `unknown dialect`.
 
@@ -215,7 +217,8 @@ atlagen/
   }
   func TestPackageName(t *testing.T) {
       // ("UserProfile","dbgen")→"userprofile"; ("Type","dbgen")→"typetbl"; ("Enum","dbgen")→"enumtbl";
-      // ("String","dbgen")→"stringtbl"; ("Dbgen","dbgen")→"dbgentbl"; ("Dialect","dbgen")→"dialecttbl"
+      // ("String","dbgen")→"stringtbl"; ("Dbgen","dbgen")→"dbgentbl"; ("Dialect","dbgen")→"dialecttbl";
+      // ("Main","dbgen")→"maintbl"; ("Internal","dbgen")→"internaltbl"; ("Vendor","dbgen")→"vendortbl"
   }
   func TestApply(t *testing.T) {
       // parsed postgres_users.json: users → Model "User", Package "user"; posts → "Post"/"post"
@@ -229,6 +232,7 @@ atlagen/
       // tables "user" + "users" → error mentioning both and `names.tables`
       // tables "user" + "user_insert" → error (UserInsert clashes with User's insert type)
       // table "client" → error (reserved root identifier "Client")
+      // table "tx" → error (model Tx clashes with the Client.Tx method)
       // columns "user_id" + "userId" in one table → error naming both columns
       // tables "user_profiles" + "userprofiles" → package clash error
       // enum "user_role" with value "admin" + enum "user_role_admin" → enum identifier clash error
@@ -455,6 +459,7 @@ atlagen/
       // repo/atlagen.yaml with out: internal/dbgen, schema: db/schema.json; cwd = repo/internal/dbgen; Flags.Config "../../atlagen.yaml"
       // → OutDir repo/internal/dbgen, Schema repo/db/schema.json (absolute), BaseDir repo
       // schema: file://db/schema.hcl (URL) → Schema unchanged, BaseDir repo
+      // dev_url: sqlite://config.db → repo/config.db (absolute); flag --dev-url sqlite://flag.db → cwd/flag.db
       // flag --out ./x from cwd → cwd/x
   }
   func TestResolveValidation(t *testing.T) {

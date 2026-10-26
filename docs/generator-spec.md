@@ -133,10 +133,12 @@ It is a dependency of the tooling module only.
   needs its required fields (`db_type` and `go_type`; `column` and `go_type`; `fk` and
   `name`). The override values are checked by the naming and mapping stages (§3, §4.5).
 - **Relative paths.** Values from `atlagen.yaml` (a schema file path, a relative
-  `file://` URL, `out`) resolve against the config file's directory, and the `atlas`
-  subprocess runs with that directory as its working directory. Values from flags
-  resolve against the current working directory, which is then also the working
-  directory of `atlas`.
+  `file://` URL, a relative `sqlite://` path in `dev_url`, `out`) resolve against the
+  config file's directory, and the `atlas` subprocess runs with that directory as its
+  working directory. Values from flags resolve against the current working directory,
+  which is then also the working directory of `atlas`. A relative SQLite path in a dev
+  URL resolves against its own source, so `--config ../atlagen.yaml` with a
+  command-line `--dev-url sqlite://dev.db` opens the database in the current directory.
 - **`dev_url`** requires `schema` to be an Atlas URL, like `--dev-url`.
 - **`names.tables`** keys must name a table of the selected schema; an unused key is an
   error. Values must be exported Go identifiers.
@@ -314,8 +316,9 @@ Renames (no error):
 
 - A package name that is a Go keyword or predeclared identifier, one of `atla`,
   `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context` (packages that
-  generated files import), or the root package name gets the suffix `tbl`
-  (`type` → `typetbl`).
+  generated files import), `main`, `internal` or `vendor` (directory names the Go
+  toolchain does not import as an ordinary package), or the root package name gets
+  the suffix `tbl` (`type` → `typetbl`, `internal` → `internaltbl`).
 - A field named `Edges`, `Table`, `Columns` or `As` gets the suffix `Col`
   (`EdgesCol`, `TableCol`, `ColumnsCol`, `AsCol`). `Edges` is reserved for
   eager-loaded relations, and each column package declares `const Table`,
@@ -335,6 +338,8 @@ or enums involved):
   For example, a table `user_queries` (model `UserQuery`) clashes with the query type
   of `users`, and a table `user_deletes` (model `UserDelete`) clashes with the delete
   query type of `users`.
+- A model named `Tx`. Each model becomes a field of `Client`, which also has the
+  `Tx` transaction method (§7.3), so the field and method would collide.
 - Two tables with different models that map to the same package.
 - Two columns of one table that map to the same field (`user_id` and `userId`).
 - Two enums that map to the same type, or an identifier of the enum package generated

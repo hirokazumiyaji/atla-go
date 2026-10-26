@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"go/token"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/mod/modfile"
@@ -131,6 +133,8 @@ type Flags struct {
 type Resolved struct {
 	// Schema is "-" (stdin), an absolute file path, or an Atlas URL as given.
 	Schema string
+	// DevURL is passed to atlas. A relative SQLite path in it is made absolute
+	// against the directory of its source.
 	DevURL string
 	// BaseDir is the directory Schema was given relative to: the config
 	// file's directory when Schema came from atlagen.yaml, else the working
@@ -168,7 +172,6 @@ func Resolve(cwd string, f Flags) (*Resolved, error) {
 	r := &Resolved{
 		BaseDir:    cwd,
 		Schema:     "-",
-		DevURL:     pick(f.DevURL, file.DevURL),
 		Dialect:    pick(f.Dialect, file.Dialect),
 		SchemaName: pick(f.SchemaName, file.SchemaName),
 		Package:    pick(f.Package, file.Package),
@@ -190,6 +193,15 @@ func Resolve(cwd string, f Flags) (*Resolved, error) {
 			r.Schema = absJoin(schemaDir, schema)
 		}
 	}
+
+	// The atlas subprocess has a single working directory (the schema's), so a
+	// relative SQLite path in the dev URL must be resolved against its own
+	// source first.
+	devURL, devDir := file.DevURL, cfgDir
+	if f.DevURL != nil {
+		devURL, devDir = *f.DevURL, cwd
+	}
+	r.DevURL = resolveDevURL(devDir, devURL)
 
 	out, outDir := file.Out, cfgDir
 	if f.Out != nil {
@@ -288,6 +300,29 @@ func pick(flag *string, config string) string {
 		return *flag
 	}
 	return config
+}
+
+// resolveDevURL makes a relative file path in a SQLite dev URL absolute
+// against dir. The atlas subprocess has one working directory, so a dev URL
+// must not depend on the directory chosen for the schema.
+func resolveDevURL(dir, raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "sqlite" && u.Scheme != "libsql+file") {
+		return raw
+	}
+	// Atlas passes everything after "://" to the SQLite driver as its DSN.
+	p := u.Host + u.Path
+	prefix := ""
+	if rest, ok := strings.CutPrefix(p, "file:"); ok {
+		prefix, p = "file:", rest
+	}
+	// ":memory:", "file::memory:" and mode=memory select in-memory databases;
+	// absolute paths are already independent of the working directory.
+	if p == "" || strings.HasPrefix(p, ":") || filepath.IsAbs(p) || u.Query().Get("mode") == "memory" {
+		return raw
+	}
+	u.Host, u.Path = "", prefix+absJoin(dir, p)
+	return u.String()
 }
 
 // absJoin returns path made absolute against dir.

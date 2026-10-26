@@ -217,6 +217,13 @@ func TestApplyCollisions(t *testing.T) {
 		msg := applyErr(t, &ir.Schema{Tables: tables("client")}, Overrides{})
 		wantContains(t, msg, `"Client"`, `"client"`, "reserved")
 	})
+	t.Run("model clashes with Client method", func(t *testing.T) {
+		msg := applyErr(t, &ir.Schema{Tables: tables("tx")}, Overrides{})
+		wantContains(t, msg, `"tx"`, `"Tx"`, "Client.Tx", "names.tables")
+
+		msg = applyErr(t, &ir.Schema{Tables: tables("counts")}, Overrides{Tables: map[string]string{"counts": "Tx"}})
+		wantContains(t, msg, `"counts"`, `"Tx"`, "Client.Tx", "names.tables")
+	})
 	t.Run("column go names", func(t *testing.T) {
 		s := &ir.Schema{Tables: []ir.Table{{DBName: "users", Columns: []ir.Column{{DBName: "user_id"}, {DBName: "userId"}}}}}
 		msg := applyErr(t, s, Overrides{})

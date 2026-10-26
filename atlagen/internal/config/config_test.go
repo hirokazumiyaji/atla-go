@@ -333,6 +333,33 @@ func TestResolveRelativeToConfigDir(t *testing.T) {
 		}
 	})
 
+	t.Run("dev URL resolves against its own source", func(t *testing.T) {
+		repo, cwd := setup(t, "version: 1\ndialect: sqlite\nout: internal/dbgen\nschema: file://db/schema.sql\ndev_url: sqlite://config.db\n")
+		want := func(path string) string { return "sqlite://" + filepath.ToSlash(path) }
+
+		// The dev URL from the config file resolves against the config directory.
+		got, err := Resolve(cwd, Flags{Config: str("../../atlagen.yaml")})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if wantURL := want(filepath.Join(repo, "config.db")); got.DevURL != wantURL {
+			t.Errorf("DevURL = %q, want %q", got.DevURL, wantURL)
+		}
+
+		// A flag dev URL resolves against cwd, even though the schema and the
+		// atlas working directory come from the config file.
+		got, err = Resolve(cwd, Flags{Config: str("../../atlagen.yaml"), DevURL: str("sqlite://flag.db")})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if wantURL := want(filepath.Join(cwd, "flag.db")); got.DevURL != wantURL {
+			t.Errorf("DevURL = %q, want %q", got.DevURL, wantURL)
+		}
+		if got.BaseDir != repo {
+			t.Errorf("BaseDir = %q, want %q (schema came from the config)", got.BaseDir, repo)
+		}
+	})
+
 	t.Run("flags resolve against cwd", func(t *testing.T) {
 		_, cwd := setup(t, "version: 1\ndialect: postgres\nout: internal/dbgen\nschema: db/schema.hcl\n")
 		got, err := Resolve(cwd, Flags{
@@ -376,6 +403,30 @@ func TestResolveRelativeToConfigDir(t *testing.T) {
 			t.Errorf("OutDir = %q, Schema = %q, want %q and -", got.OutDir, got.Schema, abs)
 		}
 	})
+}
+
+func TestResolveDevURL(t *testing.T) {
+	dir := t.TempDir()
+	abs := func(path string) string { return "sqlite://" + filepath.ToSlash(filepath.Join(dir, path)) }
+
+	tests := map[string]string{
+		"sqlite://dev.db":                     abs("dev.db"),
+		"sqlite://./dev.db":                   abs("dev.db"),
+		"sqlite://../dev.db":                  abs("../dev.db"),
+		"sqlite://dev.db?mode=ro":             abs("dev.db") + "?mode=ro",
+		"libsql+file://dev.db":                "libsql+file://" + filepath.ToSlash(filepath.Join(dir, "dev.db")),
+		"sqlite:///abs/dev.db":                "sqlite:///abs/dev.db",
+		"sqlite://file:/abs/dev.db":           "sqlite://file:/abs/dev.db",
+		"sqlite://:memory:":                   "sqlite://:memory:",
+		"sqlite://file?mode=memory":           "sqlite://file?mode=memory",
+		"sqlite://file::memory:?cache=shared": "sqlite://file::memory:?cache=shared",
+		"docker://postgres/16/dev":            "docker://postgres/16/dev",
+	}
+	for in, want := range tests {
+		if got := resolveDevURL(dir, in); got != want {
+			t.Errorf("resolveDevURL(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestResolveValidation(t *testing.T) {

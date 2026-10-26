@@ -20,6 +20,11 @@ type Overrides struct {
 // (Plan Decision 7).
 var reservedRoot = []string{"Client", "NewClient", "Dialect"}
 
+// reservedClient are the exported identifiers declared by the generated Client
+// besides one repository field per model (Plan Decision 7). A model with one
+// of these names would collide with the method.
+var reservedClient = []string{"Tx"}
+
 // derivedTypes are the root-package identifiers each model reserves besides
 // itself (Plan Decision 7).
 var derivedTypes = []struct{ suffix, what string }{
@@ -52,6 +57,7 @@ func Apply(s *ir.Schema, o Overrides) error {
 		errs = append(errs, nameEnum(&s.Enums[i])...)
 	}
 	errs = append(errs, rootClashes(s.Tables)...)
+	errs = append(errs, clientClashes(s.Tables)...)
 	errs = append(errs, packageClashes(s.Tables)...)
 	for _, t := range s.Tables {
 		errs = append(errs, columnClashes(t)...)
@@ -143,6 +149,18 @@ func rootClashes(tables []ir.Table) []error {
 	for _, id := range sortedKeys(ids) {
 		if owners := ids[id]; len(owners) > 1 {
 			errs = append(errs, fmt.Errorf("root identifier %q is generated more than once (%s); rename with names.tables", id, strings.Join(owners, ", ")))
+		}
+	}
+	return errs
+}
+
+// clientClashes reports models whose Client field would collide with a method
+// the generated Client declares.
+func clientClashes(tables []ir.Table) []error {
+	var errs []error
+	for _, t := range tables {
+		if t.Model != "" && slices.Contains(reservedClient, t.Model) {
+			errs = append(errs, fmt.Errorf("table %q: model %q collides with the Client.%s method; rename it with names.tables", t.DBName, t.Model, t.Model))
 		}
 	}
 	return errs
