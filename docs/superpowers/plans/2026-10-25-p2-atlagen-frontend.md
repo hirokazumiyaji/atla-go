@@ -137,7 +137,7 @@ atlagen/
   ```
   `Parse` fills only DB facts: `Schema.{Name,Dialect,Enums[].DBName,Enums[].Values[].DB,Tables}`, `Table.{DBName,Columns,PrimaryKey,Uniques,ForeignKeys}`, and `Column.{DBName,RawType,Enum,Nullable,HasDefault,InPK}`. All Go-name and Go-type fields stay zero.
 
-- [ ] **Step 1: Write the failing tests** (`parser_test.go`, table-driven where possible).
+- [x] **Step 1: Write the failing tests** (`parser_test.go`, table-driven where possible).
   ```go
   func TestParsePostgresUsers(t *testing.T) {
       // postgres_users.json, dialect "postgres", schemaName "":
@@ -173,14 +173,14 @@ atlagen/
       // duplicate table names; PK or FK naming an unknown column → error naming table and column
   }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/parser/`. Expected: FAIL (build fails because names are undefined).
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/parser/`. Expected: FAIL (build fails because names are undefined).
+- [x] **Step 3: Implement.**
   - Decode into lenient intermediate structs, using `json.RawMessage` for polymorphic fields (`type`, column refs, `ref_table`, attrs).
   - Mirror the Python helpers in `parser.py`: `_extract_raw_type`, `_column_has_default` (default set; a serial-family type `serial|serial2|serial4|serial8|smallserial|bigserial`; `auto_increment` truthy; `identity` set; attrs whose type or name contains `auto_increment`/`identity` or which carry `auto_increment: true`), `_column_name_tuple`, `_index_part_columns`, and `_extract_ref_table`.
   - Add the SQLite rowid rule: `dialect == "sqlite"`, a single-column PK, and the lowercased raw type is exactly `integer`.
   - `Column.Enum` is set when the column's raw type, lowercased with any `schema.` prefix stripped, equals a schema enum's lowercased name.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add IR types and Atlas JSON parser"`
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add IR types and Atlas JSON parser"`
 
 ### Task 2: Naming
 
@@ -199,7 +199,7 @@ atlagen/
   ```
   `Apply` fills `Table.Model`, `Table.Package`, `Column.GoName`, `Enum.GoName` and `EnumValue.Go`.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   ```go
   func TestPascal(t *testing.T) {
       // "user_id"→"UserID", "avatar_url"→"AvatarURL", "api_keys"→"APIKeys", "http_status"→"HTTPStatus",
@@ -234,13 +234,13 @@ atlagen/
       // override key "nope" not matching any table → error; override value "lower" (unexported) → error
   }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/naming/`. Expected: FAIL.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/naming/`. Expected: FAIL.
+- [x] **Step 3: Implement.**
   - **Initialisms:** use exactly the list in generator-spec §3. A word matches when it equals an initialism case-insensitively; it is then upper-cased. Plural `<initialism>s` becomes `<INITIALISM>s`.
   - **Singular:** port the `_UNCHANGING` and `_IRREGULAR_SINGULAR` tables and the suffix rules from `/home/user/atla/packages/atlagen/src/atlagen/naming.py`.
   - **Collision errors:** report every clash, not just the first. Join them with `errors.Join`, in deterministic order.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add naming rules and collision checks"`
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add naming rules and collision checks"`
 
 ### Task 8: Replace the JSON parser with an Atlas HCL parser (runs after Task 2)
 
@@ -281,7 +281,7 @@ atlagen/
   - Input whose first non-space byte is `{` → `input looks like JSON; atlagen reads Atlas HCL — run "atlas schema inspect" without --format`.
   - All structural errors from Task 1 are kept (unknown column in PK/FK/index, duplicate table/column, missing type, …) in the same lowercase `table "t": column "c": …` form.
 
-- [ ] **Step 1: Write the failing tests.** Port every Task 1 test to the `.hcl` fixtures, keeping the same expected IR. Then add these:
+- [x] **Step 1: Write the failing tests.** Port every Task 1 test to the `.hcl` fixtures, keeping the same expected IR. Then add these:
   ```go
   func TestParseHCLVariants(t *testing.T) {
       // inline HCL: default = 0, default = "bob", default = sql("CURRENT_TIMESTAMP") → HasDefault
@@ -296,10 +296,10 @@ atlagen/
   func TestParseRefSchemaNormalized(t *testing.T) { /* same-schema FK written with explicit schema qualifier → RefSchema ""; cross-schema (multi_schema.hcl) → "audit" */ }
   func TestParseEnumExactMatch(t *testing.T) { /* enums "Mood" and "mood"; column type enum.mood → Enum "mood" */ }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/parser/`. Expected: FAIL.
-- [ ] **Step 3: Implement.** Write the parser as described in Rules, and update the naming tests' fixture paths.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && grep '^go 1.24.0$' go.mod`. Expected: PASS, and the go directive is unchanged.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): parse Atlas HCL instead of lossy inspect JSON"`
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/parser/`. Expected: FAIL.
+- [x] **Step 3: Implement.** Write the parser as described in Rules, and update the naming tests' fixture paths.
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && grep '^go 1.24.0$' go.mod`. Expected: PASS, and the go directive is unchanged.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): parse Atlas HCL instead of lossy inspect JSON"`
 
 ### Task 3: Type mapper and scan plans
 
@@ -319,7 +319,7 @@ atlagen/
   ```
   `Apply` fills `Column.GoType`, `Column.Kind` and `Column.Scan`.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   ```go
   func TestNormalizeType(t *testing.T) {
       // "character varying(255)"→"character varying", "NUMERIC(10, 2)"→"numeric", "timestamp with time zone"→"timestamptz",
@@ -358,14 +358,14 @@ atlagen/
       // override db_type matching is on NormalizeType of both sides ("VARCHAR(10)" override matches "varchar")
   }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/mapper/`. Expected: FAIL.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/mapper/`. Expected: FAIL.
+- [x] **Step 3: Implement.**
   - Mapping tables come from generator-spec §4.1 and §4.2 plus Plan Decisions 10–12.
   - Postgres aliases: `int2`/`int4`/`int8`, `float4`/`float8`, `bool`, `serial2`/`serial4`/`serial8`, `bpchar`, `character`.
   - Arrays are detected by the suffix `[]` on the normalized type.
   - Warnings are sorted.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add SQL to Go type mapper with scan plans"`
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add SQL to Go type mapper with scan plans"`
 
 ### Task 4: Input loading (`inspect`)
 
@@ -385,7 +385,7 @@ atlagen/
   - Otherwise → read the file. A relative path is joined to `Dir` when `Dir` is non-empty.
   - Empty input from any source → error `empty schema input`.
 
-- [ ] **Step 1: Write the failing tests.** Fake atlas: a test helper writes an executable `atlas` sh script into `t.TempDir()` and prepends that directory to `PATH` with `t.Setenv`. The script appends its args to `args.txt`, writes its working directory to `pwd.txt`, prints a fixture to stdout, and exits with `$FAKE_ATLAS_EXIT`. Skip these tests on Windows.
+- [x] **Step 1: Write the failing tests.** Fake atlas: a test helper writes an executable `atlas` sh script into `t.TempDir()` and prepends that directory to `PATH` with `t.Setenv`. The script appends its args to `args.txt`, writes its working directory to `pwd.txt`, prints a fixture to stdout, and exits with `$FAKE_ATLAS_EXIT`. Skip these tests on Windows.
   ```go
   func TestLoadStdin(t *testing.T) { /* Schema "-" and "" read Stdin bytes verbatim */ }
   func TestLoadFile(t *testing.T) { /* absolute path; relative path + Dir; missing file → error containing the path */ }
@@ -399,10 +399,10 @@ atlagen/
   func TestLoadEmpty(t *testing.T) { /* empty stdin → "empty schema input" */ }
   func TestLoadContextCancel(t *testing.T) { /* cancelled ctx → error; the fake atlas sleeps */ }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/inspect/`. Expected: FAIL.
-- [ ] **Step 3: Implement.** Use `exec.LookPath("atlas")` and `exec.CommandContext`. Capture stderr in a buffer and trim it to at most 4 KiB in the error.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add schema input loading (stdin, file, atlas CLI)"`
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/inspect/`. Expected: FAIL.
+- [x] **Step 3: Implement.** Use `exec.LookPath("atlas")` and `exec.CommandContext`. Capture stderr in a buffer and trim it to at most 4 KiB in the error.
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add schema input loading (stdin, file, atlas CLI)"`
 
 ### Task 5: Configuration and resolution
 
@@ -434,7 +434,7 @@ atlagen/
   func ModuleImportPath(outDir string) (string, error)
   ```
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   ```go
   func TestLoadFile(t *testing.T) {
       // the full generator-spec §1.4 example parses into File with every field set
@@ -463,14 +463,14 @@ atlagen/
   }
   func TestModuleImportPath(t *testing.T) { /* nested existing dir; not-yet-existing out dir (walks from nearest existing ancestor); module root itself → module path */ }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/config/`. Expected: FAIL.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/config/`. Expected: FAIL.
+- [x] **Step 3: Implement.**
   - Parse with `yaml.NewDecoder` plus `KnownFields(true)`.
   - Read the module path with `modfile.ModulePath`.
   - Convert `File.Types` and `File.Columns` to the mapper types.
   - A flag value counts as set only when its pointer is non-nil.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && grep '^go ' go.mod` (expect `go 1.24.0`). Expected: PASS.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add config file and option resolution"`
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && grep '^go ' go.mod` (expect `go 1.24.0`). Expected: PASS.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add config file and option resolution"`
 
 ### Task 6: Pipeline and `atlagen` CLI (`ir`, `version`)
 
@@ -497,7 +497,7 @@ atlagen/
     - Each warning goes to stderr as `atlagen: warning: <w>`.
   - No args, `-h`, or an unknown command prints usage listing `ir` and `version` to stderr and exits 2. A flag parse error also exits 2. A pipeline or resolve error prints `atlagen: <err>` and exits 1.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   ```go
   func TestPipelineRun(t *testing.T) {
       // composite.hcl via r.Schema (file), dialect postgres, temp module → no error;
@@ -514,10 +514,10 @@ atlagen/
   func TestCLIUsageErrors(t *testing.T) { /* no args, "bogus", "ir --nope" → exit 2 with usage on stderr; missing --dialect → exit 1 "atlagen: dialect is required" */ }
   func TestCLIDeterministic(t *testing.T) { /* two runs → identical stdout bytes */ }
   ```
-- [ ] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./...`. Expected: FAIL.
-- [ ] **Step 3: Implement.** `main()` calls `os.Exit(run(signal.NotifyContext(...), os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Getwd()))`. Each subcommand gets its own `flag.FlagSet` with `ContinueOnError`, and only flags that were actually set are copied into `config.Flags` (via `fs.Visit`). Generate the golden files with `-update`, inspect them by hand for correctness (Go names, kinds, scan plans), then commit them.
-- [ ] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && go vet ./... && golangci-lint run && gofmt -l .`, then the repo-root gate `cd .. && go test -race ./... && bash scripts/check-no-deps.sh`. Expected: all pass, no gofmt output.
-- [ ] **Step 5: Commit.** `git commit -m "feat(atlagen): add pipeline and atlagen ir/version commands"`
+- [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./...`. Expected: FAIL.
+- [x] **Step 3: Implement.** `main()` calls `os.Exit(run(signal.NotifyContext(...), os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Getwd()))`. Each subcommand gets its own `flag.FlagSet` with `ContinueOnError`, and only flags that were actually set are copied into `config.Flags` (via `fs.Visit`). Generate the golden files with `-update`, inspect them by hand for correctness (Go names, kinds, scan plans), then commit them.
+- [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./... && go vet ./... && golangci-lint run && gofmt -l .`, then the repo-root gate `cd .. && go test -race ./... && bash scripts/check-no-deps.sh`. Expected: all pass, no gofmt output.
+- [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add pipeline and atlagen ir/version commands"`
 
 ### Task 7: Docs sync and final verification
 
@@ -532,6 +532,6 @@ atlagen/
 - Modify: `docs/roadmap.md`: P2 item 5 lists `ir`/`version`; P3 gains `generate`/`check`.
 - Modify: `docs/architecture.md` §3: the generator packages live under `atlagen/internal/`.
 
-- [ ] **Step 1: Update the docs.** They must match the exported surface and the behaviour of Tasks 1–6. Write them in the present tense, describing current behaviour; no history wording.
-- [ ] **Step 2: Run the full verification.** Run: `cd atlagen && gofmt -l . && go vet ./... && go test -race ./... && golangci-lint run && grep '^go 1.24.0$' go.mod && cd .. && go test -race ./... && bash scripts/check-no-deps.sh && GOWORK=off sh -c 'cd atlagen && go build ./...'`. Expected: every command exits 0 with no gofmt output.
-- [ ] **Step 3: Commit.** `git commit -m "docs: sync generator spec and roadmap with P2 implementation"`
+- [x] **Step 1: Update the docs.** They must match the exported surface and the behaviour of Tasks 1–6. Write them in the present tense, describing current behaviour; no history wording.
+- [x] **Step 2: Run the full verification.** Run: `cd atlagen && gofmt -l . && go vet ./... && go test -race ./... && golangci-lint run && grep '^go 1.24.0$' go.mod && cd .. && go test -race ./... && bash scripts/check-no-deps.sh && GOWORK=off sh -c 'cd atlagen && go build ./...'`. Expected: every command exits 0 with no gofmt output.
+- [x] **Step 3: Commit.** `git commit -m "docs: sync generator spec and roadmap with P2 implementation"`
