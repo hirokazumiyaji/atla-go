@@ -59,7 +59,7 @@ Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then show
 10. **Override `go_type` parsing.**
     - A type with a package path is written `path.Type`, split at the last `.` after the last `/`. For example, `github.com/google/uuid.UUID` gives import `github.com/google/uuid` and name `uuid.UUID`, and `time.Duration` gives import `time` and name `time.Duration`.
     - A builtin (`string`, `int64`, …) has no import.
-    - Kind: builtin integer/float → `NumberColumn`, `string` → `StringColumn`, anything else → `Column`.
+    - Kind: builtin integer/float in `atla.Number` → `NumberColumn`, `string` → `StringColumn`, anything else → `Column`. `uint` and `uintptr` are not in `atla.Number`, so they use `Column`.
     - Scan plan: builtins follow the normal rules; non-builtin types use `direct`. They are assumed to be `sql.Scanner`s; validation with `go/types` happens in P3.
 11. **Scan plans.**
     - `widen` applies to builtin integer and float types whose values fit an `int64`/`float64` intermediate: `int`, `int8`–`int32`, `uint8`–`uint32`, `byte`, `rune`, `float32`, and `uintptr`. `int64`, `float64`, `uint` and `uint64` use `direct`: the unsigned types can exceed `int64` and `database/sql` parses them with `strconv.ParseUint`, but `uintptr` cannot be a scan destination, so it keeps `widen`.
@@ -360,7 +360,7 @@ atlagen/
       // ColumnOverride beats TypeOverride for the same column
       // TypeOverride{"interval","time.Duration"} → Name "time.Duration", ImportPath "time"
       // ColumnOverride{"users.age","int64"} → int64 NumberColumn direct (builtin); ColumnOverride{"users.id","int32"} → widen;
-      // uint64/uint overrides → direct (they can exceed int64); uintptr → widen (not a valid scan destination)
+      // uint64 → NumberColumn direct; uint → Column direct; uintptr → Column widen (not a valid scan destination)
       // TypeOverride for a db type not in the schema → warning; ColumnOverride "users.nope" → error
       // override db_type matching is on NormalizeType of both sides ("VARCHAR(10)" override matches "varchar")
   }

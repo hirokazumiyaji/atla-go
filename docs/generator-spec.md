@@ -480,9 +480,11 @@ plan without reflection.
   qualifier is the last path element, skipping a `/vN` major-version element and a
   gopkg.in `.vN` suffix (`github.com/foo/bar/v2.Thing` → `bar.Thing`). The type name
   must be exported, and the qualifier must be a Go identifier.
-- **Kind.** A builtin integer or float type gives `NumberColumn`, `string` gives
-  `StringColumn`, anything else gives `Column` (the `Null` variants for nullable
-  columns).
+- **Kind.** A builtin integer or float type in `atla.Number` gives `NumberColumn`,
+  `string` gives `StringColumn`, anything else gives `Column` (the `Null` variants for
+  nullable columns). `uint` and `uintptr` are integers but not in `atla.Number`, so
+  they use `Column`; every generated `NumberColumn[T]` therefore satisfies the
+  runtime constraint.
 - **Scan plan.** Builtins follow §4.4, including the SQLite JSON text-to-bytes plans.
   Non-builtin types are never widened: they are assumed to implement `sql.Scanner` and
   take `direct` (or `nullptr` when nullable with `--nullable=pointer`). P3 validates

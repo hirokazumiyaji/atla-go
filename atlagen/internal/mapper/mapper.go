@@ -165,6 +165,23 @@ var (
 	otherTypes = setOf("bool", "string", "[]byte")
 )
 
+// numberTypes are the integer and float types accepted by atla.Number
+// (runtime column.go), which is the constraint on NumberColumn. uint and
+// uintptr are integers, but they are not in that set, so overrides using them
+// get Column instead.
+var numberTypes = func() map[string]bool {
+	m := make(map[string]bool, len(integerTypes)+len(floatTypes))
+	for t := range integerTypes {
+		if t != "uint" && t != "uintptr" {
+			m[t] = true
+		}
+	}
+	for t := range floatTypes {
+		m[t] = true
+	}
+	return m
+}()
+
 func setOf(items ...string) map[string]bool {
 	m := make(map[string]bool, len(items))
 	for _, it := range items {
@@ -351,7 +368,7 @@ func overrideMapping(goType string) (mapping, error) {
 	}
 	kind := ir.KindColumn
 	switch {
-	case integerTypes[t.Name] || floatTypes[t.Name]:
+	case numberTypes[t.Name]:
 		kind = ir.KindNumber
 	case t.Name == "string":
 		kind = ir.KindString

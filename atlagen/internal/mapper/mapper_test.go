@@ -414,7 +414,7 @@ func TestOverrides(t *testing.T) {
 		checkColumn(t, column(t, s, "users", "price"), want{"float32", "", ir.KindNumber, ir.ScanWiden})
 	})
 
-	t.Run("64-bit unsigned types scan directly", func(t *testing.T) {
+	t.Run("64-bit unsigned types", func(t *testing.T) {
 		s := users()
 		mustApply(t, s, with(nil, []ColumnOverride{
 			{Column: "users.id", GoType: "uint64"},
@@ -423,9 +423,10 @@ func TestOverrides(t *testing.T) {
 			{Column: "users.ttl", GoType: "uint32"},
 		}))
 		checkColumn(t, column(t, s, "users", "id"), want{"uint64", "", ir.KindNumber, ir.ScanDirect})
-		checkColumn(t, column(t, s, "users", "age"), want{"uint", "", ir.KindNumber, ir.ScanDirect})
+		// uint and uintptr are not in atla.Number, so they use Column.
+		checkColumn(t, column(t, s, "users", "age"), want{"uint", "", ir.KindColumn, ir.ScanDirect})
 		// database/sql cannot scan into uintptr directly, so it keeps widen.
-		checkColumn(t, column(t, s, "users", "price"), want{"uintptr", "", ir.KindNumber, ir.ScanWiden})
+		checkColumn(t, column(t, s, "users", "price"), want{"uintptr", "", ir.KindColumn, ir.ScanWiden})
 		checkColumn(t, column(t, s, "users", "ttl"), want{"uint32", "", ir.KindNumber, ir.ScanWiden})
 
 		// Nullable uint64 cannot use the signed int64 intermediate either.
@@ -433,6 +434,17 @@ func TestOverrides(t *testing.T) {
 		s.Tables[0].Columns[0].Nullable = true
 		mustApply(t, s, with(nil, []ColumnOverride{{Column: "users.id", GoType: "uint64"}}))
 		checkColumn(t, column(t, s, "users", "id"), want{"uint64", "", ir.KindNullNumber, ir.ScanNullPtr})
+
+		// The nullable kinds follow the same Number rule.
+		s = users()
+		s.Tables[0].Columns[1].Nullable = true // age
+		s.Tables[0].Columns[4].Nullable = true // price
+		mustApply(t, s, with(nil, []ColumnOverride{
+			{Column: "users.age", GoType: "uint"},
+			{Column: "users.price", GoType: "uintptr"},
+		}))
+		checkColumn(t, column(t, s, "users", "age"), want{"uint", "", ir.KindNullColumn, ir.ScanNullPtr})
+		checkColumn(t, column(t, s, "users", "price"), want{"uintptr", "", ir.KindNullColumn, ir.ScanNullWiden})
 	})
 
 	t.Run("override on a nullable column", func(t *testing.T) {
