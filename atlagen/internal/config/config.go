@@ -264,6 +264,9 @@ func Resolve(cwd string, f Flags) (*Resolved, error) {
 func loadConfig(cwd string, flag *string) (*File, string, error) {
 	path := filepath.Join(cwd, DefaultFile)
 	if flag != nil {
+		if *flag == "" {
+			return nil, "", errors.New("--config: file path is empty")
+		}
 		path = absJoin(cwd, *flag)
 	} else if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return &File{}, cwd, nil
@@ -312,16 +315,16 @@ func resolveDevURL(dir, raw string) string {
 	}
 	// Atlas passes everything after "://" to the SQLite driver as its DSN.
 	p := u.Host + u.Path
-	prefix := ""
-	if rest, ok := strings.CutPrefix(p, "file:"); ok {
-		prefix, p = "file:", rest
-	}
+	// A file: DSN keeps its own naming rules. A relative one never reaches
+	// this point because net/url reads "file:dev.db" as an invalid port.
+	//
 	// ":memory:", "file::memory:" and mode=memory select in-memory databases;
 	// absolute paths are already independent of the working directory.
-	if p == "" || strings.HasPrefix(p, ":") || filepath.IsAbs(p) || u.Query().Get("mode") == "memory" {
+	if p == "" || strings.HasPrefix(p, ":") || strings.HasPrefix(p, "file:") ||
+		filepath.IsAbs(p) || u.Query().Get("mode") == "memory" {
 		return raw
 	}
-	u.Host, u.Path = "", prefix+absJoin(dir, p)
+	u.Host, u.Path = "", absJoin(dir, p)
 	return u.String()
 }
 

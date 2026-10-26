@@ -71,7 +71,7 @@ Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then show
 14. **Relative paths.**
     - Values from `atlagen.yaml` (a schema file path, a relative `file://` URL, `out`) resolve against the config file's directory, and the `atlas` subprocess runs with that directory as its working directory.
     - Values from flags resolve against the current working directory.
-    - A relative SQLite path in `dev_url` / `--dev-url` resolves against the directory of its own source and is then made absolute, because the atlas subprocess has one working directory.
+    - A relative SQLite path in `dev_url` / `--dev-url` resolves against the directory of its own source and is then made absolute, because the atlas subprocess has one working directory. SQLite `file:` URIs are passed through unchanged.
 15. **`--dev-url` without an Atlas URL in `--schema`** is a usage error.
 16. **Unsupported dialects:** `mysql` and `tidb` fail with `dialect "mysql" is not supported yet`. Any other value fails with `unknown dialect`.
 
@@ -464,6 +464,7 @@ atlagen/
   }
   func TestResolveValidation(t *testing.T) {
       // missing dialect → "dialect is required"; "mysql" → `dialect "mysql" is not supported yet`; "oracle" → "unknown dialect"
+      // empty --config value → error containing "--config"
       // missing out → "out is required"; nullable "ptr" → error listing pointer|sqlnull
       // out base "db-gen" without package → error containing "set --package"; package "Bad" or "type" → error
       // DevURL with schema "-" → error containing "--dev-url requires"

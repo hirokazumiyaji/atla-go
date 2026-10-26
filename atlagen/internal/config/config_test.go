@@ -416,6 +416,8 @@ func TestResolveDevURL(t *testing.T) {
 		"sqlite://dev.db?mode=ro":             abs("dev.db") + "?mode=ro",
 		"libsql+file://dev.db":                "libsql+file://" + filepath.ToSlash(filepath.Join(dir, "dev.db")),
 		"sqlite:///abs/dev.db":                "sqlite:///abs/dev.db",
+		"sqlite://file:dev.db":                "sqlite://file:dev.db",
+		"sqlite://file:./dev.db?mode=ro":      "sqlite://file:./dev.db?mode=ro",
 		"sqlite://file:/abs/dev.db":           "sqlite://file:/abs/dev.db",
 		"sqlite://:memory:":                   "sqlite://:memory:",
 		"sqlite://file?mode=memory":           "sqlite://file?mode=memory",
@@ -435,6 +437,7 @@ func TestResolveValidation(t *testing.T) {
 		flags Flags
 		want  string
 	}{
+		{"empty config", Flags{Config: str(""), Dialect: str("postgres"), Out: str("gen")}, "--config"},
 		{"missing dialect", Flags{Out: str("gen")}, "dialect is required"},
 		{"mysql", Flags{Dialect: str("mysql"), Out: str("gen")}, `dialect "mysql" is not supported yet`},
 		{"tidb", Flags{Dialect: str("tidb"), Out: str("gen")}, `dialect "tidb" is not supported yet`},

@@ -139,6 +139,7 @@ It is a dependency of the tooling module only.
   which is then also the working directory of `atlas`. A relative SQLite path in a dev
   URL resolves against its own source, so `--config ../atlagen.yaml` with a
   command-line `--dev-url sqlite://dev.db` opens the database in the current directory.
+  SQLite `file:` URIs are passed to `atlas` unchanged.
 - **`dev_url`** requires `schema` to be an Atlas URL, like `--dev-url`.
 - **`names.tables`** keys must name a table of the selected schema; an unused key is an
   error. Values must be exported Go identifiers.

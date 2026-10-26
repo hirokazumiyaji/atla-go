@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,7 +52,7 @@ func Load(ctx context.Context, src Source) ([]byte, error) {
 	case IsURL(src.Schema):
 		data, err = runAtlas(ctx, src)
 	default:
-		data, err = readFile(src)
+		data, err = readFile(ctx, src)
 	}
 	if err != nil {
 		return nil, err
@@ -62,15 +63,12 @@ func Load(ctx context.Context, src Source) ([]byte, error) {
 	return data, nil
 }
 
-// readStdin reads r in a goroutine so that cancellation can interrupt a read
-// blocked on a terminal or an open pipe. If the read does not return, the
+// readAll runs read in a goroutine so that cancellation can interrupt a read
+// blocked on a terminal, a pipe or a named pipe. If read does not return, its
 // goroutine stays blocked and the CLI exits after reporting the cancellation.
-func readStdin(ctx context.Context, r io.Reader) ([]byte, error) {
-	if r == nil {
-		return nil, errors.New("reading schema from stdin: no input stream")
-	}
+func readAll(ctx context.Context, what string, read func() ([]byte, error)) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("reading schema from stdin: %w", err)
+		return nil, fmt.Errorf("%s: %w", what, err)
 	}
 	type result struct {
 		data []byte
@@ -78,30 +76,37 @@ func readStdin(ctx context.Context, r io.Reader) ([]byte, error) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		data, err := io.ReadAll(r)
+		data, err := read()
 		done <- result{data: data, err: err}
 	}()
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("reading schema from stdin: %w", ctx.Err())
+		return nil, fmt.Errorf("%s: %w", what, ctx.Err())
 	case res := <-done:
 		if res.err != nil {
-			return nil, fmt.Errorf("reading schema from stdin: %w", res.err)
+			return nil, fmt.Errorf("%s: %w", what, res.err)
 		}
 		return res.data, nil
 	}
 }
 
-func readFile(src Source) ([]byte, error) {
+func readStdin(ctx context.Context, r io.Reader) ([]byte, error) {
+	if r == nil {
+		return nil, errors.New("reading schema from stdin: no input stream")
+	}
+	return readAll(ctx, "reading schema from stdin", func() ([]byte, error) {
+		return io.ReadAll(r)
+	})
+}
+
+func readFile(ctx context.Context, src Source) ([]byte, error) {
 	path := src.Schema
 	if src.Dir != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(src.Dir, path)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading schema file %q: %w", path, err)
-	}
-	return data, nil
+	return readAll(ctx, fmt.Sprintf("reading schema file %q", path), func() ([]byte, error) {
+		return os.ReadFile(path)
+	})
 }
 
 func runAtlas(ctx context.Context, src Source) ([]byte, error) {
@@ -129,10 +134,35 @@ func runAtlas(ctx context.Context, src Source) ([]byte, error) {
 		if len(msg) > maxStderr {
 			msg = strings.ToValidUTF8(msg[:maxStderr], "")
 		}
+		msg = redactStderr(msg, src.Schema, src.DevURL)
 		if msg == "" {
 			return nil, fmt.Errorf("atlas schema inspect failed: %w", err)
 		}
 		return nil, fmt.Errorf("atlas schema inspect failed: %w: %s", err, msg)
 	}
 	return stdout.Bytes(), nil
+}
+
+// redactStderr masks the password of every database URL passed to atlas.
+// Atlas may echo those URLs in connection errors.
+func redactStderr(msg string, urls ...string) string {
+	for _, raw := range urls {
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.User == nil {
+			continue
+		}
+		password, ok := u.User.Password()
+		if !ok || password == "" {
+			continue
+		}
+		msg = strings.ReplaceAll(msg, raw, u.Redacted())
+		// Atlas may rewrite the URL around the credentials; mask the password
+		// in its userinfo position without touching unrelated text.
+		redacted := url.UserPassword(u.User.Username(), "xxxxx").String()
+		msg = strings.ReplaceAll(msg, u.User.String(), redacted)
+	}
+	return msg
 }

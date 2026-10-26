@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -283,5 +284,68 @@ func TestLoadStdinContextCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Load did not return after cancellation")
+	}
+}
+
+func TestLoadFileContextCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mkfifo is not available on windows")
+	}
+	// Opening a FIFO for reading blocks until a writer connects, so this
+	// mimics a schema file on a hung network mount.
+	path := filepath.Join(t.TempDir(), "schema.hcl")
+	if out, err := exec.Command("mkfifo", path).CombinedOutput(); err != nil {
+		t.Skipf("mkfifo: %v: %s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := Load(ctx, Source{Schema: path})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("Load took %v after cancellation", elapsed)
+	}
+}
+
+func TestRedactStderr(t *testing.T) {
+	const dsn = "postgres://user:s3cret@db:5432/app"
+	tests := []struct{ name, in, want string }{
+		{"whole URL", "dial " + dsn + ": refused", "dial postgres://user:xxxxx@db:5432/app: refused"},
+		{"rewritten URL", `dial failed for "postgres://user:s3cret@db:9999/app"`, `dial failed for "postgres://user:xxxxx@db:9999/app"`},
+		{"no password", "dial postgres://user@db:5432/app: refused", "dial postgres://user@db:5432/app: refused"},
+	}
+	for _, tt := range tests {
+		// A URL without a password and a non-URL must be ignored.
+		got := redactStderr(tt.in, dsn, "sqlite://dev.db", "", "not a url")
+		if got != tt.want {
+			t.Errorf("%s: redactStderr = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+
+	// A short password must not rewrite unrelated occurrences.
+	got := redactStderr("error: encoding failed", "postgres://u:e@db/app")
+	if want := "error: encoding failed"; got != want {
+		t.Errorf("short password: redactStderr = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRedactsAtlasStderr(t *testing.T) {
+	const schema = "postgres://user:s3cret@db:5432/app"
+	installFakeAtlas(t, "echo \"connect $* failed\" >&2\n")
+	t.Setenv("FAKE_ATLAS_EXIT", "1")
+
+	_, err := Load(context.Background(), Source{Schema: schema, DevURL: "docker://postgres/16/dev"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "s3cret") {
+		t.Errorf("error leaks the password: %s", msg)
+	}
+	if !strings.Contains(msg, "xxxxx") {
+		t.Errorf("error = %q, want the password masked", msg)
 	}
 }
