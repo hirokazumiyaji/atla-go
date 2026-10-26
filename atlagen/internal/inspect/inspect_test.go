@@ -338,10 +338,24 @@ func TestRedactStderr(t *testing.T) {
 		t.Errorf("malformed: redactStderr = %q, want %q", got, want)
 	}
 
+	// net/url may echo only a fragment of a malformed URL.
+	if got, want := redactStderr(`invalid port ":dummysecret" after host`, "postgres://user:dummysecret/@db/app"), `invalid port ":xxxxx" after host`; got != want {
+		t.Errorf("bad port: redactStderr = %q, want %q", got, want)
+	}
+	if got, want := redactStderr(`invalid URL escape "%ss"`, "postgres://review:review%ss@localhost/app"), `invalid URL escape "xxxxx"`; got != want {
+		t.Errorf("bad escape: redactStderr = %q, want %q", got, want)
+	}
+
 	// The stderr cap can cut the password before its closing '@'.
 	truncated := "bad postgres://user:s3c"
 	if got, want := redactStderr(truncated, dsn), "bad postgres://user:xxxxx"; got != want {
 		t.Errorf("truncated: redactStderr = %q, want %q", got, want)
+	}
+
+	// Every occurrence must be masked, not just the first one.
+	in := "a postgres://user:s3cret@db/app b postgres://user:s3c"
+	if got, want := redactStderr(in, dsn), "a postgres://user:xxxxx@db/app b postgres://user:xxxxx"; got != want {
+		t.Errorf("repeated: redactStderr = %q, want %q", got, want)
 	}
 }
 

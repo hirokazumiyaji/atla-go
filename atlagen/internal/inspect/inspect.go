@@ -163,55 +163,87 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 
 // redactStderr masks the password of every database URL passed to atlas.
 // Atlas may echo those URLs in connection errors, including URLs that net/url
-// rejects, so the credentials are split out by hand.
+// rejects and fragments such as `invalid port ":secret" after host`, so the
+// credentials are split out by hand.
 func redactStderr(msg string, urls ...string) string {
 	for _, raw := range urls {
-		userinfo, masked, ok := credentialUserinfo(raw)
+		userinfo, password, ok := credentialParts(raw)
 		if !ok {
 			continue
 		}
-		msg = strings.ReplaceAll(msg, userinfo, masked)
-		// The stderr cap may cut the password off before its closing '@'.
-		// Mask the rest of that userinfo span too.
-		username, _, _ := strings.Cut(userinfo, ":")
+		colon := strings.IndexByte(userinfo, ':')
+		username, maskedUser := userinfo[:colon], userinfo[:colon]+":xxxxx"
+
+		// Complete URL occurrences.
+		msg = strings.ReplaceAll(msg, "://"+userinfo, "://"+maskedUser)
+
+		// A URL cut off by the stderr cap has no closing '@'; mask every
+		// remaining marker, including one after an already-redacted URL.
 		marker := "://" + username + ":"
-		i := strings.Index(msg, marker)
-		if i < 0 {
-			continue
+		redactedURL := "://" + maskedUser
+		for search := 0; ; {
+			i := strings.Index(msg[search:], marker)
+			if i < 0 {
+				break
+			}
+			i += search
+			if strings.HasPrefix(msg[i:], redactedURL) {
+				search = i + len(redactedURL)
+				continue
+			}
+			start := i + len(marker)
+			end := strings.IndexAny(msg[start:], " \t\r\n\"'")
+			if end < 0 {
+				end = len(msg) - start
+			}
+			msg = msg[:start] + "xxxxx" + msg[start+end:]
+			search = start + len("xxxxx")
 		}
-		start := i + len(marker)
-		end := strings.IndexByte(msg[start:], '@')
-		if end < 0 {
-			end = strings.IndexAny(msg[start:], " \t\r\n")
+
+		// Atlas parse errors can echo just the password, e.g.
+		// `invalid port ":secret" after host`.
+		msg = strings.ReplaceAll(msg, ":"+password, ":xxxxx")
+
+		// A URL-escape error echoes "%xx" from the password.
+		for i := 0; i < len(password); i++ {
+			if password[i] != '%' {
+				continue
+			}
+			frag := password[i:]
+			if len(frag) > 3 {
+				frag = frag[:3]
+			}
+			msg = strings.ReplaceAll(msg, frag, "xxxxx")
 		}
-		if end < 0 {
-			end = len(msg) - start
-		}
-		msg = msg[:start] + "xxxxx" + msg[start+end:]
 	}
 	return msg
 }
 
-// credentialUserinfo returns the "user:password" part of a URL and the same
-// part with the password masked. It works without net/url so that a URL Atlas
-// rejects is still redacted if Atlas echoes it.
-func credentialUserinfo(raw string) (userinfo, masked string, ok bool) {
+// credentialParts returns the "user:password" part of a URL and its password.
+// It works without net/url so a URL Atlas rejects is still redacted. A
+// misplaced delimiter can push '@' out of the authority; the raw URL still has
+// to contain an '@' for the part before the colon to be credentials.
+func credentialParts(raw string) (userinfo, password string, ok bool) {
 	i := strings.Index(raw, "://")
 	if i < 0 {
 		return "", "", false
 	}
-	authority := raw[i+3:]
+	rest := raw[i+3:]
+	authority := rest
 	if j := strings.IndexAny(authority, "/?#"); j >= 0 {
 		authority = authority[:j]
 	}
 	at := strings.LastIndexByte(authority, '@')
 	if at < 0 {
-		return "", "", false
+		if !strings.Contains(rest, "@") {
+			return "", "", false
+		}
+		at = len(authority)
 	}
 	userinfo = authority[:at]
 	colon := strings.IndexByte(userinfo, ':')
 	if colon < 0 || colon == len(userinfo)-1 {
 		return "", "", false
 	}
-	return userinfo, userinfo[:colon] + ":xxxxx", true
+	return userinfo, userinfo[colon+1:], true
 }
