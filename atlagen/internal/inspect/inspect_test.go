@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -347,5 +348,23 @@ func TestLoadRedactsAtlasStderr(t *testing.T) {
 	}
 	if !strings.Contains(msg, "xxxxx") {
 		t.Errorf("error = %q, want the password masked", msg)
+	}
+}
+
+func TestLoadRedactsStderrBeforeTruncation(t *testing.T) {
+	const schema = "postgres://user:s3cret@db/app"
+	// Put the length cap three bytes into the password: redacting after
+	// truncation would leave "s3c" in the message.
+	padding := maxStderr - len("postgres://user:") - 3
+	installFakeAtlas(t, fmt.Sprintf(
+		"printf '%%%ds' '' | tr ' ' x >&2\nprintf '%%s\\n' %q >&2\n", padding, schema))
+	t.Setenv("FAKE_ATLAS_EXIT", "1")
+
+	_, err := Load(context.Background(), Source{Schema: schema})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if msg := err.Error(); strings.Contains(msg, "s3c") || strings.Contains(msg, "s3cret") {
+		t.Errorf("error leaks part of the password: %q", msg)
 	}
 }

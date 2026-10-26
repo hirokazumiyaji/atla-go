@@ -130,11 +130,10 @@ func runAtlas(ctx context.Context, src Source) ([]byte, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("atlas schema inspect canceled: %w", ctxErr)
 		}
-		msg := strings.TrimSpace(stderr.String())
+		msg := redactStderr(strings.TrimSpace(stderr.String()), src.Schema, src.DevURL)
 		if len(msg) > maxStderr {
 			msg = strings.ToValidUTF8(msg[:maxStderr], "")
 		}
-		msg = redactStderr(msg, src.Schema, src.DevURL)
 		if msg == "" {
 			return nil, fmt.Errorf("atlas schema inspect failed: %w", err)
 		}
