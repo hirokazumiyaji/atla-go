@@ -61,9 +61,10 @@ Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then show
     - Kind: builtin integer/float → `NumberColumn`, `string` → `StringColumn`, anything else → `Column`.
     - Scan plan: builtins follow the normal rules; non-builtin types use `direct`. They are assumed to be `sql.Scanner`s; validation with `go/types` happens in P3.
 11. **Scan plans.**
-    - `widen` applies to every builtin integer or float type except `int64` and `float64`.
+    - `widen` applies to builtin integer and float types whose values fit an `int64`/`float64` intermediate: `int`, `int8`–`int32`, `uint8`–`uint32`, `byte`, `rune`, `float32`, and `uintptr`. `int64`, `float64`, `uint` and `uint64` use `direct`: the unsigned types can exceed `int64` and `database/sql` parses them with `strconv.ParseUint`, but `uintptr` cannot be a scan destination, so it keeps `widen`.
     - A nullable column with `--nullable=pointer` gets `nullptr`, or `nullwiden` if it is a widen type.
     - A nullable column with `sqlnull` gets `direct` (the field is a `sql.Null[T]`), or `nullwiden` if it is a widen type.
+    - SQLite `json` keeps the `json.RawMessage` Go type but gets `textbytes` (`nulltextbytes` when nullable): the driver returns text as a `string`, so the scanner goes through `[]byte` and converts.
 12. **SQLite unknown types.** First try the explicit table in §4.2, then SQLite affinity rules: contains `int` → `int64`; contains `char`/`clob`/`text` → `string`; contains `blob` → `[]byte`; contains `real`/`floa`/`doub` → `float64`. Only if both fail is the type mapped to `string` with a warning.
 13. **Uniques** are unique indexes whose parts are all plain columns. Indexes that have an expression part or a `where` predicate are excluded, because they cannot prove O2O.
 14. **Relative paths.**
@@ -126,7 +127,7 @@ atlagen/
   type Column struct { DBName, GoName, RawType, Enum string; GoType GoType; Kind ColumnKind; Nullable, HasDefault, InPK bool; Scan ScanPlan }
   type GoType struct { Name, ImportPath string }
   type ColumnKind string // KindColumn "Column", KindNumber "NumberColumn", KindString "StringColumn", KindNullColumn "NullColumn", KindNullNumber "NullNumberColumn", KindNullString "NullStringColumn"
-  type ScanPlan string   // ScanDirect "direct", ScanWiden "widen", ScanNullPtr "nullptr", ScanNullWiden "nullwiden"
+  type ScanPlan string   // ScanDirect "direct", ScanWiden "widen", ScanNullPtr "nullptr", ScanNullWiden "nullwiden", ScanTextBytes "textbytes", ScanNullTextBytes "nulltextbytes"
   type ForeignKey struct { Symbol string; Columns []string; RefSchema, RefTable string; RefColumns []string }
   func (c Column) RequiredForInsert() bool // !Nullable && !HasDefault
   func (t Table) Column(dbName string) (Column, bool)
@@ -262,12 +263,12 @@ atlagen/
   - Any other top-level block (`view`, `function`, `sequence`, …) is ignored.
 - **Schema selection:** `schemaName == ""` picks the first `schema` block in file order. Only tables and enums whose `schema` attribute references the selected schema are included. Error messages stay as Task 1 defined them (`schema "x" not found; available: …`, `has no tables`).
 - **Column:**
-  - `null = true` → Nullable (absent → false); PK columns are never Nullable.
+  - `null = true` → Nullable (absent → false), except where the database guarantees NOT NULL: Postgres/MySQL primary keys, SQLite `WITHOUT ROWID` primary keys, and the SQLite `INTEGER PRIMARY KEY` rowid alias. Ordinary SQLite rowid tables allow NULL in non-INTEGER and composite primary keys.
   - `type`: an identifier (`integer`, `bigserial`, `timestamptz`, `double_precision`) or a call (`varchar(255)`, `numeric(10,2)`) becomes RawType. The identifier's `_` is replaced by a space (`double_precision` → `double precision`, `character_varying(255)` → `character varying(255)`), and args are rendered back, comma-joined, without spaces.
   - `sql("<t>")` → RawType `<t>`.
   - `enum.<name>` → `Column.Enum = <name>` and RawType `<name>`.
   - Verify these renderings against atlas-src's type specs and record any exception in the parser's comments.
-- **HasDefault:** true when any of these holds: a `default` attribute is present (any expression); `auto_increment = true`; an `identity` block is present; the type is in the serial family; the SQLite rowid rule (single-column PK with RawType lowercased equal to `integer`).
+- **HasDefault:** true when any of these holds: a `default` attribute is present (any expression); `auto_increment = true`; an `identity` block is present; the type is in the Postgres serial family; the SQLite rowid rule (single-column PK with RawType lowercased equal to `integer`). SQLite assigns no default semantics to serial-family type names.
 - **Keys and indexes:**
   - `primary_key { columns = [column.a, column.b] }` → PrimaryKey in that order.
   - `index "<n>"` contributes to Uniques only when `unique = true`, it has no `where`, and every part is a column (`columns = [...]`, or `on { column = column.x }` blocks, with no `on { expr = … }`).
@@ -342,7 +343,8 @@ atlagen/
   func TestPostgresUnmapped(t *testing.T) { /* raw type "xml" → error naming table, column, type and "types:" */ }
   func TestSQLiteTable(t *testing.T) {
       // sqlite_types.hcl: INTEGER→int64 direct; DATETIME→time.Time; BOOLEAN→bool; VARCHAR(10)→string StringColumn;
-      // MEDIUMINT→int64 (affinity); NUMERIC(10,2)→string; FOO→string + exactly one warning naming table, column and "FOO"
+      // MEDIUMINT→int64 (affinity); NUMERIC(10,2)→string; FOO→string + exactly one warning naming table, column and "FOO";
+      // JSON→json.RawMessage with the textbytes scan plan (nulltextbytes when nullable)
   }
   func TestNullability(t *testing.T) {
       // nullable integer, pointer → Kind NullNumberColumn, Scan nullwiden; nullable text, pointer → NullStringColumn, nullptr
@@ -353,7 +355,8 @@ atlagen/
       // TypeOverride{"numeric","github.com/shopspring/decimal.Decimal"} → "decimal.Decimal"
       // ColumnOverride beats TypeOverride for the same column
       // TypeOverride{"interval","time.Duration"} → Name "time.Duration", ImportPath "time"
-      // ColumnOverride{"users.age","int64"} → int64 NumberColumn direct (builtin); ColumnOverride{"users.id","int32"} → widen
+      // ColumnOverride{"users.age","int64"} → int64 NumberColumn direct (builtin); ColumnOverride{"users.id","int32"} → widen;
+      // uint64/uint overrides → direct (they can exceed int64); uintptr → widen (not a valid scan destination)
       // TypeOverride for a db type not in the schema → warning; ColumnOverride "users.nope" → error
       // override db_type matching is on NormalizeType of both sides ("VARCHAR(10)" override matches "varchar")
   }

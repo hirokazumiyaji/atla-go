@@ -262,7 +262,7 @@ func TestSQLiteTable(t *testing.T) {
 	s := fixture(t, "sqlite_types.hcl", "sqlite")
 	warnings := mustApply(t, s, Options{Dialect: "sqlite", Nullable: NullPointer})
 
-	// The rowid alias is printed null = true, but PK columns are never nullable.
+	// The rowid alias is printed null = true, but it is never NULL.
 	checkColumn(t, column(t, s, "things", "id"), want{"int64", "", ir.KindNumber, ir.ScanDirect})
 	checkColumn(t, column(t, s, "things", "created_at"), want{"time.Time", "time", ir.KindColumn, ir.ScanDirect})
 	checkColumn(t, column(t, s, "things", "active"), want{"bool", "", ir.KindColumn, ir.ScanDirect})
@@ -296,7 +296,7 @@ func TestSQLiteAffinity(t *testing.T) {
 		"date":              {"time.Time", "time", ir.KindColumn, ir.ScanDirect},
 		"timestamp":         {"time.Time", "time", ir.KindColumn, ir.ScanDirect},
 		"uuid":              {"string", "", ir.KindColumn, ir.ScanDirect},
-		"json":              {"json.RawMessage", "encoding/json", ir.KindColumn, ir.ScanDirect},
+		"json":              {"json.RawMessage", "encoding/json", ir.KindColumn, ir.ScanTextBytes},
 		"decimal(5,1)":      {"string", "", ir.KindColumn, ir.ScanDirect},
 		"bool":              {"bool", "", ir.KindColumn, ir.ScanDirect},
 	}
@@ -307,6 +307,24 @@ func TestSQLiteAffinity(t *testing.T) {
 		}
 		checkColumn(t, s.Tables[0].Columns[0], w)
 	}
+}
+
+func TestSQLiteJSONScanPlan(t *testing.T) {
+	schema := func() *ir.Schema {
+		return &ir.Schema{Dialect: "sqlite", Tables: []ir.Table{{DBName: "t", Columns: []ir.Column{
+			{DBName: "doc", RawType: "json"},
+			{DBName: "opt_doc", RawType: "json", Nullable: true},
+		}}}}
+	}
+
+	s := schema()
+	mustApply(t, s, Options{Dialect: "sqlite", Nullable: NullPointer})
+	checkColumn(t, column(t, s, "t", "doc"), want{"json.RawMessage", "encoding/json", ir.KindColumn, ir.ScanTextBytes})
+	checkColumn(t, column(t, s, "t", "opt_doc"), want{"json.RawMessage", "encoding/json", ir.KindNullColumn, ir.ScanNullTextBytes})
+
+	s = schema()
+	mustApply(t, s, Options{Dialect: "sqlite", Nullable: NullSQLNull})
+	checkColumn(t, column(t, s, "t", "opt_doc"), want{"json.RawMessage", "encoding/json", ir.KindNullColumn, ir.ScanNullTextBytes})
 }
 
 func TestNullability(t *testing.T) {
@@ -394,6 +412,27 @@ func TestOverrides(t *testing.T) {
 		checkColumn(t, column(t, s, "users", "ext_id"), want{"string", "", ir.KindString, ir.ScanDirect})
 		checkColumn(t, column(t, s, "users", "other_id"), want{"[]byte", "", ir.KindColumn, ir.ScanDirect})
 		checkColumn(t, column(t, s, "users", "price"), want{"float32", "", ir.KindNumber, ir.ScanWiden})
+	})
+
+	t.Run("64-bit unsigned types scan directly", func(t *testing.T) {
+		s := users()
+		mustApply(t, s, with(nil, []ColumnOverride{
+			{Column: "users.id", GoType: "uint64"},
+			{Column: "users.age", GoType: "uint"},
+			{Column: "users.price", GoType: "uintptr"},
+			{Column: "users.ttl", GoType: "uint32"},
+		}))
+		checkColumn(t, column(t, s, "users", "id"), want{"uint64", "", ir.KindNumber, ir.ScanDirect})
+		checkColumn(t, column(t, s, "users", "age"), want{"uint", "", ir.KindNumber, ir.ScanDirect})
+		// database/sql cannot scan into uintptr directly, so it keeps widen.
+		checkColumn(t, column(t, s, "users", "price"), want{"uintptr", "", ir.KindNumber, ir.ScanWiden})
+		checkColumn(t, column(t, s, "users", "ttl"), want{"uint32", "", ir.KindNumber, ir.ScanWiden})
+
+		// Nullable uint64 cannot use the signed int64 intermediate either.
+		s = users()
+		s.Tables[0].Columns[0].Nullable = true
+		mustApply(t, s, with(nil, []ColumnOverride{{Column: "users.id", GoType: "uint64"}}))
+		checkColumn(t, column(t, s, "users", "id"), want{"uint64", "", ir.KindNullNumber, ir.ScanNullPtr})
 	})
 
 	t.Run("override on a nullable column", func(t *testing.T) {

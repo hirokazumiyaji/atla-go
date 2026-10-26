@@ -198,7 +198,7 @@ type GoType struct {
 }
 
 type ColumnKind string     // KindColumn, KindNumber, KindString, KindNullColumn, KindNullNumber, KindNullString
-type ScanPlan string       // ScanDirect, ScanWiden, ScanNullPtr, ScanNullWiden
+type ScanPlan string       // ScanDirect, ScanWiden, ScanNullPtr, ScanNullWiden, ScanTextBytes, ScanNullTextBytes
 
 type ForeignKey struct {
     Symbol      string
@@ -240,13 +240,16 @@ naming (§3) and mapping (§4) stages.
   get the `interval` keyword back. A column of a schema enum (`enum.user_role`) gets
   `RawType` and `Enum` set to the enum name. A column of an enum from another schema
   gets `RawType` `<schema>.<name>` and no `Enum`, so it needs an override (§4.5).
-- **Nullable** is `null = true`. Primary-key columns are never nullable, even when Atlas
-  prints `null = true` (SQLite does for some keys).
+- **Nullable** is `null = true`, except where the database guarantees NOT NULL:
+  Postgres and MySQL primary keys, SQLite `WITHOUT ROWID` primary keys, and the
+  SQLite `INTEGER PRIMARY KEY` rowid alias. An ordinary SQLite rowid table allows NULL
+  in non-INTEGER and composite primary keys, and Atlas prints `null = true` for them.
 - **HasDefault** is set when the column has a `default`, an `identity` block,
-  `auto_increment = true`, a `serial`-family type (`serial`, `serial2`, `serial4`,
-  `serial8`, `smallserial`, `bigserial`), or (SQLite) is the single-column
+  `auto_increment = true`, a Postgres `serial`-family type (`serial`, `serial2`,
+  `serial4`, `serial8`, `smallserial`, `bigserial`), or (SQLite) is the single-column
   `INTEGER PRIMARY KEY`, an alias of the rowid. A `WITHOUT ROWID` table (printed
   `without_rowid = true`) has no rowid, so its `INTEGER PRIMARY KEY` has no default.
+  SQLite assigns no implicit defaults to the serial-family type names.
 - **Generated** is set by an `as { expr = "…" }` block (what Atlas prints) or an
   `as = "…"` attribute.
 - **Uniques** come from Postgres `unique "<name>" {}` blocks (Atlas prints UNIQUE
@@ -406,6 +409,11 @@ code depend on pgx. A later phase may add an opt-in `pgx` codec package.
 | `uuid` | `string` | `Column[string]` |
 | `json` | `json.RawMessage` | `Column[json.RawMessage]` |
 
+SQLite stores JSON as text, and the recommended `modernc.org/sqlite` driver returns it
+as a Go `string`. A `json.RawMessage` column therefore uses the `textbytes` scan plan
+(§4.4), which scans through `[]byte` and converts; a `string` driver value cannot be
+scanned into `json.RawMessage` directly.
+
 A type that is not in the table goes through SQLite's affinity rules, in this order:
 contains `int` → `int64`; contains `char`, `clob` or `text` → `string`
 (`StringColumn`); contains `blob` → `[]byte`; contains `real`, `floa` or `doub` →
@@ -437,9 +445,11 @@ column so that the generated scanner avoids slow `database/sql` conversion paths
 | Plan | When | Generated code |
 | :--- | :--- | :--- |
 | `direct` | NOT NULL and not a widen type: the Go type matches the driver value (`int64`, `float64`, `string`, `[]byte`, `bool`, `time.Time`, `sql.Scanner` types such as enums and non-builtin overrides). Also a nullable non-widen column with `--nullable=sqlnull`, whose field is a `sql.Null[T]`. | `&u.Field` |
-| `widen` | NOT NULL with a widen type: every builtin integer or float type except `int64` and `float64` (`int16`, `int32`, `float32`, and override types such as `int` or `uint8`). `database/sql` would otherwise go through `strconv`. | scan into an `int64`/`float64` local, then convert |
+| `widen` | NOT NULL with a widen type: builtin integer and float types whose values fit an `int64`/`float64` intermediate (`int`, `int8`–`int32`, `uint8`–`uint32`, `byte`, `rune`, `float32`, and `uintptr`). `int64`, `float64`, `uint` and `uint64` take `direct`: the unsigned types can exceed `int64` and `database/sql` parses them with `strconv.ParseUint`, but `uintptr` cannot be a scan destination, so it keeps `widen`. | scan into an `int64`/`float64` local, then convert |
 | `nullptr` | nullable with `--nullable=pointer`, not a widen type | scan into `sql.Null[T]` local; `if n.Valid { v := n.V; u.Field = &v }` (allocates only for non-NULL) |
 | `nullwiden` | nullable with a widen type, with either `--nullable` style | `sql.Null[int64]` local, then convert and take the address |
+| `textbytes` | NOT NULL SQLite `json`: the driver returns text as a `string`, which `database/sql` cannot scan into `json.RawMessage` | scan into a `[]byte` local, then convert to `json.RawMessage` |
+| `nulltextbytes` | nullable SQLite `json`, with either `--nullable` style | scan into `sql.Null[[]byte]`; for `pointer` take the address of the converted value, for `sqlnull` fill `sql.Null[json.RawMessage]` |
 
 Generated enum types implement `sql.Scanner` and `driver.Valuer`. The scanner
 rejects values outside the enum with an error, so enum columns take the `direct`
@@ -468,9 +478,10 @@ plan without reflection.
 - **Kind.** A builtin integer or float type gives `NumberColumn`, `string` gives
   `StringColumn`, anything else gives `Column` (the `Null` variants for nullable
   columns).
-- **Scan plan.** Builtins follow §4.4. Non-builtin types are never widened: they are
-  assumed to implement `sql.Scanner` and take `direct` (or `nullptr` when nullable with
-  `--nullable=pointer`). P3 validates them with `go/types` (§8).
+- **Scan plan.** Builtins follow §4.4, including the SQLite JSON text-to-bytes plans.
+  Non-builtin types are never widened: they are assumed to implement `sql.Scanner` and
+  take `direct` (or `nullptr` when nullable with `--nullable=pointer`). P3 validates
+  them with `go/types` (§8).
 
 ---
 

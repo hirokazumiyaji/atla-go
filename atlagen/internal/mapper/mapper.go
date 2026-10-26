@@ -254,7 +254,7 @@ func Apply(s *ir.Schema, o Options) (warnings []string, err error) {
 			if c.Nullable {
 				c.Kind = nullKinds[m.kind]
 			}
-			c.Scan = scanPlan(m.goType.Name, c.Nullable, style)
+			c.Scan = scanPlan(o.Dialect, m, c.Nullable, style)
 		}
 	}
 	if len(errs) > 0 {
@@ -434,20 +434,34 @@ func sqliteMapping(key, raw string) (m mapping, warning string) {
 }
 
 // widenTypes are the builtins scanned through an int64/float64 local (Plan
-// Decision 11).
+// Decision 11). int64 and float64 already match the driver values. uint and
+// uint64 are excluded because their values can exceed int64 and database/sql
+// scans them directly with strconv.ParseUint. uintptr keeps the widen plan
+// because database/sql cannot scan into it directly.
 var widenTypes = func() map[string]bool {
 	m := setOf("float32")
 	for t := range integerTypes {
-		if t != "int64" {
-			m[t] = true
+		switch t {
+		case "int64", "uint64", "uint":
+			continue
 		}
+		m[t] = true
 	}
 	return m
 }()
 
 // scanPlan picks the scan plan (generator-spec §4.4, Plan Decision 11).
-func scanPlan(goType string, nullable bool, style NullStyle) ir.ScanPlan {
-	widen := widenTypes[goType]
+func scanPlan(dialect string, m mapping, nullable bool, style NullStyle) ir.ScanPlan {
+	// SQLite drivers return JSON text as a string, which database/sql cannot
+	// scan into json.RawMessage directly. Scan through []byte, which accepts
+	// both string and []byte driver values, then convert.
+	if dialect == "sqlite" && m.goType == jsonColumn.goType {
+		if nullable {
+			return ir.ScanNullTextBytes
+		}
+		return ir.ScanTextBytes
+	}
+	widen := widenTypes[m.goType.Name]
 	switch {
 	case widen && nullable:
 		return ir.ScanNullWiden

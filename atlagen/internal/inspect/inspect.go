@@ -47,7 +47,7 @@ func Load(ctx context.Context, src Source) ([]byte, error) {
 	)
 	switch {
 	case src.Schema == "" || src.Schema == "-":
-		data, err = readStdin(src.Stdin)
+		data, err = readStdin(ctx, src.Stdin)
 	case IsURL(src.Schema):
 		data, err = runAtlas(ctx, src)
 	default:
@@ -62,15 +62,34 @@ func Load(ctx context.Context, src Source) ([]byte, error) {
 	return data, nil
 }
 
-func readStdin(r io.Reader) ([]byte, error) {
+// readStdin reads r in a goroutine so that cancellation can interrupt a read
+// blocked on a terminal or an open pipe. If the read does not return, the
+// goroutine stays blocked and the CLI exits after reporting the cancellation.
+func readStdin(ctx context.Context, r io.Reader) ([]byte, error) {
 	if r == nil {
 		return nil, errors.New("reading schema from stdin: no input stream")
 	}
-	data, err := io.ReadAll(r)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("reading schema from stdin: %w", err)
 	}
-	return data, nil
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		done <- result{data: data, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("reading schema from stdin: %w", ctx.Err())
+	case res := <-done:
+		if res.err != nil {
+			return nil, fmt.Errorf("reading schema from stdin: %w", res.err)
+		}
+		return res.data, nil
+	}
 }
 
 func readFile(src Source) ([]byte, error) {

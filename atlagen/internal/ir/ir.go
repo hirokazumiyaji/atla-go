@@ -74,10 +74,12 @@ type ScanPlan string
 
 // Scan plans (generator-spec §4.4).
 const (
-	ScanDirect    ScanPlan = "direct"
-	ScanWiden     ScanPlan = "widen"
-	ScanNullPtr   ScanPlan = "nullptr"
-	ScanNullWiden ScanPlan = "nullwiden"
+	ScanDirect        ScanPlan = "direct"
+	ScanWiden         ScanPlan = "widen"
+	ScanNullPtr       ScanPlan = "nullptr"
+	ScanNullWiden     ScanPlan = "nullwiden"
+	ScanTextBytes     ScanPlan = "textbytes"
+	ScanNullTextBytes ScanPlan = "nulltextbytes"
 )
 
 // ForeignKey is a foreign-key constraint declared on a table.

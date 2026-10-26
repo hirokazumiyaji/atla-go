@@ -277,6 +277,10 @@ func (p *parser) parseTable(tb object) (ir.Table, error) {
 	if p.dialect == "sqlite" && len(t.PrimaryKey) == 1 && !withoutRowid {
 		rowidPK = t.PrimaryKey[0]
 	}
+	// Primary keys are NOT NULL only where the database enforces it. A SQLite
+	// rowid table allows NULL in non-INTEGER and composite primary keys;
+	// WITHOUT ROWID tables and the INTEGER PRIMARY KEY rowid alias do not.
+	pkNotNull := p.dialect != "sqlite" || withoutRowid
 
 	known := make(map[string]bool)
 	columnIndex := 0
@@ -284,7 +288,7 @@ func (p *parser) parseTable(tb object) (ir.Table, error) {
 		if b.Type != "column" {
 			continue
 		}
-		c, err := p.parseColumn(b, columnIndex, rowidPK, inPK)
+		c, err := p.parseColumn(b, columnIndex, rowidPK, inPK, pkNotNull)
 		if err != nil {
 			return ir.Table{}, wrap(err)
 		}
@@ -345,8 +349,9 @@ func checkColumns(label string, cols []string, known map[string]bool) error {
 }
 
 // parseColumn reads one column block. rowidPK names the table's rowid-alias
-// candidate ("" when there is none).
-func (p *parser) parseColumn(b *hclsyntax.Block, index int, rowidPK string, inPK map[string]bool) (ir.Column, error) {
+// candidate ("" when there is none); pkNotNull reports whether the database
+// guarantees that every primary-key column is NOT NULL.
+func (p *parser) parseColumn(b *hclsyntax.Block, index int, rowidPK string, inPK map[string]bool, pkNotNull bool) (ir.Column, error) {
 	name := blockName(b)
 	if name == "" {
 		return ir.Column{}, fmt.Errorf("column at index %d has no name", index)
@@ -377,16 +382,22 @@ func (p *parser) parseColumn(b *hclsyntax.Block, index int, rowidPK string, inPK
 		Enum:    enum,
 		InPK:    inPK[name],
 	}
-	// Primary-key columns are never NULL, even when Atlas prints null = true
-	// (SQLite reports it for INTEGER PRIMARY KEY and non-INTEGER keys).
-	c.Nullable = null && !c.InPK
-	c.HasDefault = hasDefault || autoIncrement || hasBlock(b.Body, "identity") || serialTypes[baseType(rawType)]
+	// SQLite prints null = true for an INTEGER PRIMARY KEY even though it is
+	// an alias of the rowid and therefore never NULL.
+	rowidAlias := rowidPK == name && strings.ToLower(rawType) == "integer"
+	// Primary-key columns are NOT NULL only when the database enforces it.
+	// Ordinary SQLite rowid tables allow NULL in non-INTEGER and composite
+	// primary keys, and Atlas prints null = true for those.
+	pkGuaranteedNotNull := c.InPK && (pkNotNull || rowidAlias)
+	c.Nullable = null && !pkGuaranteedNotNull
+	// Serial types give Postgres only their implicit nextval default.
+	c.HasDefault = hasDefault || autoIncrement || hasBlock(b.Body, "identity") ||
+		(p.dialect == "postgres" && serialTypes[baseType(rawType)])
 	// Atlas prints a generated column as an as { expr = "…" type = STORED }
 	// block and also accepts as = "…" (specutil.ConvertGenExpr).
 	_, asAttr := b.Body.Attributes["as"]
 	c.Generated = asAttr || hasBlock(b.Body, "as")
-	// SQLite: an INTEGER PRIMARY KEY column is an alias of the rowid.
-	if rowidPK == name && strings.ToLower(rawType) == "integer" {
+	if rowidAlias {
 		c.HasDefault = true
 	}
 	return c, nil
@@ -472,7 +483,11 @@ func typeArg(expr hclsyntax.Expression) (string, bool) {
 	if s, ok := stringLiteral(expr); ok {
 		return "'" + strings.ReplaceAll(s, "'", "''") + "'", true
 	}
-	if _, ok := expr.(*hclsyntax.LiteralValueExpr); !ok {
+	// Atlas can print signed numbers, notably a negative Postgres numeric
+	// scale: numeric(10,-2). HCL parses -2 as a unary operation, not a literal.
+	switch expr.(type) {
+	case *hclsyntax.LiteralValueExpr, *hclsyntax.UnaryOpExpr:
+	default:
 		return "", false
 	}
 	var s string

@@ -3,6 +3,8 @@ package inspect
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -246,5 +248,40 @@ func TestLoadContextCancel(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Errorf("Load took %v after cancellation", elapsed)
+	}
+}
+
+// blockingReader blocks in Read until release is closed.
+type blockingReader struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	close(r.started)
+	<-r.release
+	return 0, io.EOF
+}
+
+func TestLoadStdinContextCancel(t *testing.T) {
+	r := &blockingReader{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(r.release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := Load(ctx, Source{Stdin: r})
+		done <- err
+	}()
+	<-r.started
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Load did not return after cancellation")
 	}
 }

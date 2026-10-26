@@ -250,8 +250,6 @@ func TestParseHCLVariants(t *testing.T) {
 		{"auto_increment false", `type = int` + "\n" + `auto_increment = false`, false},
 		{"identity by default", "type = bigint\nidentity {\n  generated = BY_DEFAULT\n}", true},
 		{"identity always", "type = bigint\nidentity {\n  generated = ALWAYS\n  start = 10\n}", true},
-		{"serial4", `type = serial4`, true},
-		{"smallserial", `type = smallserial`, true},
 		{"plain", `type = int`, false},
 	}
 	for _, tc := range hasDefault {
@@ -269,6 +267,7 @@ func TestParseHCLVariants(t *testing.T) {
 		{"identifier", `integer`, "integer"},
 		{"call", `varchar(255)`, "varchar(255)"},
 		{"call two args", `numeric(10, 2)`, "numeric(10,2)"},
+		{"negative scale", `numeric(10,-2)`, "numeric(10,-2)"},
 		{"sql", `sql("geometry(Point,4326)")`, "geometry(Point,4326)"},
 		{"sql array", `sql("text[]")`, "text[]"},
 		{"underscore identifier", `double_precision`, "double precision"},
@@ -369,9 +368,49 @@ column "x" {
 		equal(t, "PrimaryKey", s.Tables[0].PrimaryKey, []string{})
 	})
 
-	t.Run("nullable pk column is not nullable", func(t *testing.T) {
-		s := mustParse(t, inlineTable("t", "column \"a\" {\nnull = true\ntype = text\n}\nprimary_key {\ncolumns = [column.a]\n}"), "sqlite")
-		equal(t, "a.Nullable", s.Tables[0].Columns[0].Nullable, false)
+	t.Run("primary key nullability", func(t *testing.T) {
+		parse := func(t *testing.T, dialect, body string) ir.Table {
+			t.Helper()
+			return mustParse(t, inlineTable("t", body), dialect).Tables[0]
+		}
+		textPK := "column \"a\" {\nnull = true\ntype = text\n}\nprimary_key {\ncolumns = [column.a]\n}"
+
+		// Ordinary SQLite rowid tables allow NULL in non-INTEGER primary keys.
+		tbl := parse(t, "sqlite", textPK)
+		equal(t, "sqlite text pk", mustColumn(t, tbl, "a"), ir.Column{DBName: "a", RawType: "text", Nullable: true, InPK: true})
+		equal(t, "sqlite text pk RequiredForInsert", mustColumn(t, tbl, "a").RequiredForInsert(), false)
+
+		// Composite SQLite primary keys are nullable too.
+		tbl = parse(t, "sqlite", `
+column "a" {
+  null = true
+  type = text
+}
+column "b" {
+  null = true
+  type = text
+}
+primary_key {
+  columns = [column.a, column.b]
+}`)
+		equal(t, "sqlite composite a", mustColumn(t, tbl, "a").Nullable, true)
+		equal(t, "sqlite composite b", mustColumn(t, tbl, "b").Nullable, true)
+
+		// The INTEGER PRIMARY KEY rowid alias is never NULL.
+		tbl = parse(t, "sqlite", "column \"a\" {\nnull = true\ntype = integer\n}\nprimary_key {\ncolumns = [column.a]\n}")
+		equal(t, "sqlite integer pk", mustColumn(t, tbl, "a"), ir.Column{DBName: "a", RawType: "integer", HasDefault: true, InPK: true})
+
+		// INT is not the rowid alias, so NULL is allowed.
+		tbl = parse(t, "sqlite", "column \"a\" {\nnull = true\ntype = int\n}\nprimary_key {\ncolumns = [column.a]\n}")
+		equal(t, "sqlite int pk", mustColumn(t, tbl, "a"), ir.Column{DBName: "a", RawType: "int", Nullable: true, InPK: true})
+
+		// WITHOUT ROWID tables enforce NOT NULL on every primary-key column.
+		tbl = parse(t, "sqlite", textPK+"\nwithout_rowid = true")
+		equal(t, "sqlite without rowid", mustColumn(t, tbl, "a"), ir.Column{DBName: "a", RawType: "text", InPK: true})
+
+		// Other dialects enforce NOT NULL on primary keys.
+		tbl = parse(t, "postgres", textPK)
+		equal(t, "postgres text pk", mustColumn(t, tbl, "a"), ir.Column{DBName: "a", RawType: "text", InPK: true})
 	})
 
 	t.Run("uniques", func(t *testing.T) {
@@ -524,6 +563,29 @@ schema "public" {
 }
 `, "postgres")
 		equal(t, "tables", tableNames(s), []string{"t"})
+	})
+}
+
+func TestParseSerialDefaults(t *testing.T) {
+	column := func(t *testing.T, dialect, typ string) ir.Column {
+		t.Helper()
+		s := mustParse(t, inlineTable("t", "column \"c\" {\nnull = false\ntype = "+typ+"\n}"), dialect)
+		return s.Tables[0].Columns[0]
+	}
+
+	// Postgres serial types create an implicit nextval default.
+	for _, typ := range []string{"serial", "serial2", "serial4", "serial8", "smallserial", "bigserial"} {
+		t.Run("postgres/"+typ, func(t *testing.T) {
+			equal(t, "HasDefault", column(t, "postgres", typ).HasDefault, true)
+		})
+	}
+
+	// SQLite assigns no default semantics to these type names.
+	t.Run("sqlite/serial", func(t *testing.T) {
+		c := column(t, "sqlite", `sql("SERIAL")`)
+		equal(t, "RawType", c.RawType, "SERIAL")
+		equal(t, "HasDefault", c.HasDefault, false)
+		equal(t, "RequiredForInsert", c.RequiredForInsert(), true)
 	})
 }
 
