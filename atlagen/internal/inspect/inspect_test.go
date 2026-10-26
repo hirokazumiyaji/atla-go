@@ -331,6 +331,31 @@ func TestRedactStderr(t *testing.T) {
 	if want := "error: encoding failed"; got != want {
 		t.Errorf("short password: redactStderr = %q, want %q", got, want)
 	}
+
+	// net/url rejects this URL, but atlas may still echo it.
+	malformed := "postgres://user:review%ss@db/app"
+	if got, want := redactStderr("bad "+malformed, malformed), "bad postgres://user:xxxxx@db/app"; got != want {
+		t.Errorf("malformed: redactStderr = %q, want %q", got, want)
+	}
+
+	// The stderr cap can cut the password before its closing '@'.
+	truncated := "bad postgres://user:s3c"
+	if got, want := redactStderr(truncated, dsn), "bad postgres://user:xxxxx"; got != want {
+		t.Errorf("truncated: redactStderr = %q, want %q", got, want)
+	}
+}
+
+func TestCappedBuffer(t *testing.T) {
+	w := &cappedBuffer{max: 5}
+	if n, err := w.Write([]byte("abcdefgh")); n != 8 || err != nil {
+		t.Fatalf("Write = %d, %v; want 8, nil", n, err)
+	}
+	if _, err := w.Write([]byte("ij")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := w.buf.String(), "abcde"; got != want {
+		t.Errorf("buffer = %q, want %q", got, want)
+	}
 }
 
 func TestLoadRedactsAtlasStderr(t *testing.T) {
@@ -353,8 +378,8 @@ func TestLoadRedactsAtlasStderr(t *testing.T) {
 
 func TestLoadRedactsStderrBeforeTruncation(t *testing.T) {
 	const schema = "postgres://user:s3cret@db/app"
-	// Put the length cap three bytes into the password: redacting after
-	// truncation would leave "s3c" in the message.
+	// Put the length cap three bytes into the password: the partial userinfo
+	// must still be masked when the buffer ends there.
 	padding := maxStderr - len("postgres://user:") - 3
 	installFakeAtlas(t, fmt.Sprintf(
 		"printf '%%%ds' '' | tr ' ' x >&2\nprintf '%%s\\n' %q >&2\n", padding, schema))

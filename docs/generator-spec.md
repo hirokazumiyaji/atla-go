@@ -317,7 +317,7 @@ Renames (no error):
 
 - A package name that is a Go keyword or predeclared identifier, one of `atla`,
   `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context` (packages that
-  generated files import), `main`, `internal` or `vendor` (directory names the Go
+  generated files import), `main`, `internal`, `vendor` or `init` (names the Go
   toolchain does not import as an ordinary package), or the root package name gets
   the suffix `tbl` (`type` → `typetbl`, `internal` → `internaltbl`).
 - A field named `Edges`, `Table`, `Columns` or `As` gets the suffix `Col`

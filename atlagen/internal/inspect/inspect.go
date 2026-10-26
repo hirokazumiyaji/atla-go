@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,11 +117,12 @@ func runAtlas(ctx context.Context, src Source) ([]byte, error) {
 	if src.DevURL != "" {
 		args = append(args, "--dev-url", src.DevURL)
 	}
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	stderr := &cappedBuffer{max: maxStderr}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = src.Dir
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 	// A killed atlas may leave grandchildren holding the pipes; do not wait
 	// for them forever.
 	cmd.WaitDelay = 2 * time.Second
@@ -130,7 +130,7 @@ func runAtlas(ctx context.Context, src Source) ([]byte, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("atlas schema inspect canceled: %w", ctxErr)
 		}
-		msg := redactStderr(strings.TrimSpace(stderr.String()), src.Schema, src.DevURL)
+		msg := redactStderr(strings.TrimSpace(stderr.buf.String()), src.Schema, src.DevURL)
 		if len(msg) > maxStderr {
 			msg = strings.ToValidUTF8(msg[:maxStderr], "")
 		}
@@ -142,26 +142,76 @@ func runAtlas(ctx context.Context, src Source) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// cappedBuffer keeps the first max bytes written and discards the rest. It
+// bounds the memory a chatty atlas can use; the error prints at most maxStderr
+// bytes anyway.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (w *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := w.max - w.buf.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		w.buf.Write(p)
+	}
+	return n, nil
+}
+
 // redactStderr masks the password of every database URL passed to atlas.
-// Atlas may echo those URLs in connection errors.
+// Atlas may echo those URLs in connection errors, including URLs that net/url
+// rejects, so the credentials are split out by hand.
 func redactStderr(msg string, urls ...string) string {
 	for _, raw := range urls {
-		if raw == "" {
+		userinfo, masked, ok := credentialUserinfo(raw)
+		if !ok {
 			continue
 		}
-		u, err := url.Parse(raw)
-		if err != nil || u.User == nil {
+		msg = strings.ReplaceAll(msg, userinfo, masked)
+		// The stderr cap may cut the password off before its closing '@'.
+		// Mask the rest of that userinfo span too.
+		username, _, _ := strings.Cut(userinfo, ":")
+		marker := "://" + username + ":"
+		i := strings.Index(msg, marker)
+		if i < 0 {
 			continue
 		}
-		password, ok := u.User.Password()
-		if !ok || password == "" {
-			continue
+		start := i + len(marker)
+		end := strings.IndexByte(msg[start:], '@')
+		if end < 0 {
+			end = strings.IndexAny(msg[start:], " \t\r\n")
 		}
-		msg = strings.ReplaceAll(msg, raw, u.Redacted())
-		// Atlas may rewrite the URL around the credentials; mask the password
-		// in its userinfo position without touching unrelated text.
-		redacted := url.UserPassword(u.User.Username(), "xxxxx").String()
-		msg = strings.ReplaceAll(msg, u.User.String(), redacted)
+		if end < 0 {
+			end = len(msg) - start
+		}
+		msg = msg[:start] + "xxxxx" + msg[start+end:]
 	}
 	return msg
+}
+
+// credentialUserinfo returns the "user:password" part of a URL and the same
+// part with the password masked. It works without net/url so that a URL Atlas
+// rejects is still redacted if Atlas echoes it.
+func credentialUserinfo(raw string) (userinfo, masked string, ok bool) {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return "", "", false
+	}
+	authority := raw[i+3:]
+	if j := strings.IndexAny(authority, "/?#"); j >= 0 {
+		authority = authority[:j]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return "", "", false
+	}
+	userinfo = authority[:at]
+	colon := strings.IndexByte(userinfo, ':')
+	if colon < 0 || colon == len(userinfo)-1 {
+		return "", "", false
+	}
+	return userinfo, userinfo[:colon] + ":xxxxx", true
 }

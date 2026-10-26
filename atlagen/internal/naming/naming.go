@@ -87,10 +87,10 @@ var reservedPackages = setOf(
 	"len", "make", "max", "min", "new", "panic", "print", "println", "real", "recover",
 	// Packages imported by generated code.
 	"atla", "dialect", "enum", "sql", "driver", "time", "json", "context",
-	// Directory names the Go toolchain does not treat as ordinary importable
-	// packages: "main" cannot be imported, "internal" restricts its importers,
-	// and "vendor" holds vendored dependencies.
-	"main", "internal", "vendor",
+	// Names the Go toolchain does not treat as ordinary importable packages:
+	// "main" cannot be imported, "internal" restricts its importers, "vendor"
+	// holds vendored dependencies, and "init" cannot name an imported package.
+	"main", "internal", "vendor", "init",
 )
 
 func setOf(items ...string) map[string]bool {

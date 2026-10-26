@@ -102,6 +102,7 @@ func TestPackageName(t *testing.T) {
 		{"Main", "dbgen", "maintbl"},
 		{"Internal", "dbgen", "internaltbl"},
 		{"Vendor", "dbgen", "vendortbl"},
+		{"Init", "dbgen", "inittbl"},
 		{"User", "dbgen", "user"},
 	}
 	for _, c := range cases {

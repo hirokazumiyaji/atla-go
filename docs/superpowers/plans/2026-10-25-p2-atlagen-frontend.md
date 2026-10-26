@@ -48,7 +48,7 @@ Task 1 parsed `atlas schema inspect --format '{{ json . }}'`. Research then show
    - Splitting: `naming.Pascal` splits on every non-ASCII-alphanumeric rune and on camelCase boundaries.
    - Leading digit: a result that starts with a digit gets the prefix `X` (`Pascal("2fa_codes")` = `X2faCodes`; the table's model, after singularization, is `X2faCode`).
    - Enum values: an enum value whose Pascal form is empty becomes `Empty`.
-6. **Reserved table-package names:** Go keywords, predeclared identifiers, `atla`, `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context`, `main`, `internal`, `vendor`, and the root package name. Any of these gets the suffix `tbl`. This extends the spec's list with the packages that generated files import and the directory names the Go toolchain will not import as an ordinary package.
+6. **Reserved table-package names:** Go keywords, predeclared identifiers, `atla`, `dialect`, `enum`, `sql`, `driver`, `time`, `json`, `context`, `main`, `internal`, `vendor`, `init`, and the root package name. Any of these gets the suffix `tbl`. This extends the spec's list with the packages that generated files import and the names the Go toolchain will not import as an ordinary package.
 7. **Root-package identifier collisions are generation errors.**
    - Reserved names: `Client`, `NewClient`, `Dialect`.
    - Each model reserves itself plus `<Model>Edges`, `<Model>Insert`, `<Model>Update`, `<Model>Query`, `<Model>Repo`, `<Model>Table`, `<Model>Key`.
@@ -218,7 +218,8 @@ atlagen/
   func TestPackageName(t *testing.T) {
       // ("UserProfile","dbgen")→"userprofile"; ("Type","dbgen")→"typetbl"; ("Enum","dbgen")→"enumtbl";
       // ("String","dbgen")→"stringtbl"; ("Dbgen","dbgen")→"dbgentbl"; ("Dialect","dbgen")→"dialecttbl";
-      // ("Main","dbgen")→"maintbl"; ("Internal","dbgen")→"internaltbl"; ("Vendor","dbgen")→"vendortbl"
+      // ("Main","dbgen")→"maintbl"; ("Internal","dbgen")→"internaltbl"; ("Vendor","dbgen")→"vendortbl";
+      // ("Init","dbgen")→"inittbl"
   }
   func TestApply(t *testing.T) {
       // parsed postgres_users.json: users → Model "User", Package "user"; posts → "Post"/"post"
@@ -407,7 +408,7 @@ atlagen/
   func TestLoadContextCancel(t *testing.T) { /* cancelled ctx → error; the fake atlas sleeps */ }
   ```
 - [x] **Step 2: Run the tests and confirm they fail.** Run: `cd atlagen && go test ./internal/inspect/`. Expected: FAIL.
-- [x] **Step 3: Implement.** Use `exec.LookPath("atlas")` and `exec.CommandContext`. Capture stderr in a buffer and trim it to at most 4 KiB in the error.
+- [x] **Step 3: Implement.** Use `exec.LookPath("atlas")` and `exec.CommandContext`. Capture stderr in a buffer capped at 4 KiB and mask the password of every database URL in the error.
 - [x] **Step 4: Run the tests and confirm they pass.** Run: `cd atlagen && go test -race ./internal/...`. Expected: PASS.
 - [x] **Step 5: Commit.** `git commit -m "feat(atlagen): add schema input loading (stdin, file, atlas CLI)"`
 
