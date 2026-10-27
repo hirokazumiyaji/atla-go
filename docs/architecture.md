@@ -59,8 +59,11 @@ that already manage their schema with Atlas:
 
 ### 1.1 Single Source of Truth: Full Delegation to Atlas
 
-`atlagen` consumes the JSON emitted by `atlas schema inspect --format '{{ json . }}'`.
-The same JSON fixtures can be used by atla and atla-go.
+`atlagen` consumes the HCL that `atlas schema inspect -u <url>` prints by default
+(no `--format`) and parses it with `github.com/hashicorp/hcl/v2`. This output carries
+everything the generator needs: defaults, identity and serial columns, Postgres enums,
+generated columns and partial-index predicates. JSON input is rejected, because
+Atlas's JSON output omits most of these.
 
 ### 1.2 Zero Runtime Overhead via AOT Code Generation
 
@@ -123,11 +126,15 @@ The same JSON fixtures can be used by atla and atla-go.
 The repository has two Go modules, mirroring atla's `packages/atla` and
 `packages/atlagen` split. The runtime module has zero dependencies, so importing
 `atla` adds nothing to an application's build. The tooling module may depend on
-`golang.org/x/tools` and a YAML parser. Installing the generator with
+`golang.org/x/tools`, a YAML parser (`go.yaml.in/yaml/v3`), `golang.org/x/mod` and the
+HCL parser `github.com/hashicorp/hcl/v2`. Installing the generator with
 `go get -tool` records those as tool dependencies in the application's `go.mod`, but
 they are never linked into application binaries. Teams that want a completely clean
 `go.mod` can run `go run github.com/hirokazumiyaji/atla-go/atlagen/cmd/atlagen@vX.Y.Z`
 instead.
+
+The generator has no public Go API: its packages live under `atlagen/internal/`. Only
+`atlavet` stays outside `internal/`, so that a golangci-lint plugin can import it.
 
 ```text
 atla-go/
@@ -164,17 +171,20 @@ atla-go/
 └── atlagen/                     # module github.com/hirokazumiyaji/atla-go/atlagen
     ├── go.mod
     ├── cmd/
-    │   ├── atlagen/main.go      # CLI: generate / check
-    │   └── atlavet/main.go      # singlechecker for the atlavet analyzer
-    ├── config/                  # atlagen.yaml + flag resolution
-    ├── inspect/                 # load Atlas JSON (stdin / file / run atlas CLI)
-    ├── ir/                      # SchemaIR, TableIR, ColumnIR, EdgeIR, …
-    ├── parser/                  # Atlas JSON -> IR
-    ├── naming/                  # Go identifiers, initialisms, singularization, edge names
-    ├── mapper/                  # SQL type -> Go type per dialect, overrides, scan codecs
-    ├── emitter/                 # text/template + go/format; templates via embed
-    │   └── templates/*.tmpl
-    └── atlavet/                 # golang.org/x/tools/go/analysis Analyzer
+    │   ├── atlagen/main.go      # CLI: ir / version (generate / check in P3)
+    │   └── atlavet/main.go      # singlechecker for the atlavet analyzer (P3)
+    ├── internal/
+    │   ├── config/              # atlagen.yaml + flag resolution, import-path detection
+    │   ├── inspect/             # load Atlas HCL (stdin / file / run atlas CLI)
+    │   ├── ir/                  # Schema, Table, Column, Enum, ForeignKey, …
+    │   ├── parser/              # Atlas inspect HCL -> IR (hashicorp/hcl/v2)
+    │   ├── naming/              # Go identifiers, initialisms, singularization, collisions
+    │   ├── mapper/              # SQL type -> Go type per dialect, overrides, scan plans
+    │   ├── pipeline/            # inspect -> parser -> naming -> mapper
+    │   ├── emitter/             # text/template + go/format; templates via embed (P3)
+    │   │   └── templates/*.tmpl
+    │   └── testdata/            # Atlas inspect fixtures (.hcl), golden IR
+    └── atlavet/                 # golang.org/x/tools/go/analysis Analyzer (P3)
 ```
 
 ---
@@ -190,10 +200,11 @@ sequenceDiagram
     participant Gen as atlagen
     participant FS as internal/dbgen/*.go
 
-    Dev->>Atlas: atlas schema inspect -u ... --format '{{ json . }}'
-    Atlas-->>Gen: Atlas JSON (stdin / file / subprocess)
-    Gen->>Gen: parser: JSON -> SchemaIR (tables, columns, PK, FKs, enums)
-    Gen->>Gen: naming + mapper: Go names, Go types, scan codecs, edges
+    Dev->>Atlas: atlas schema inspect -u ...
+    Atlas-->>Gen: Atlas HCL (stdin / file / subprocess)
+    Gen->>Gen: parser: HCL -> ir.Schema (tables, columns, PK, uniques, FKs, enums)
+    Gen->>Gen: naming + mapper: Go names, Go types, scan plans
+    Gen->>Gen: edges: FKs -> M2O / O2M / O2O
     Gen->>Gen: emitter: templates -> go/format
     Gen->>FS: client.go, enums.go, <table>.go, <table>/<table>.go
 ```

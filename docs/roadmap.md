@@ -50,27 +50,36 @@ flowchart LR
 
 ## P2: Generator Front End (`atlagen`)
 
-1. `inspect`: stdin, file, and `atlas schema inspect` subprocess.
-2. `parser` → `ir`: tables, columns, PK (incl. composite), uniques, FKs (incl.
-   composite), enums, and `HasDefault` detection. Reuse atla's
-   `tests/fixtures/atlas/*.json`.
-3. `naming`: initialisms, singularization, collisions, and overrides.
-4. `mapper`: Postgres and SQLite tables, overrides, and scan plans.
-5. `config` + `cmd/atlagen`: `generate`, `check`, `version`, YAML config, and
-   import-path detection.
+All packages live under `atlagen/internal/`.
+
+1. `inspect`: stdin, file, and an `atlas schema inspect -u <url>` subprocess.
+2. `parser` → `ir`: reads Atlas's default HCL output (`atlas schema inspect -u …`, no
+   `--format`) with `hashicorp/hcl/v2` and rejects JSON input. Covers schema
+   selection, tables, columns, PK (incl. composite), uniques, FKs (incl. composite,
+   cross-schema and external targets), enums, and `HasDefault` / `Generated`
+   detection. Fixtures are `atlagen/internal/testdata/atlas/*.hcl`.
+3. `naming`: initialisms, singularization, identifier sanitizing, collisions, and
+   overrides.
+4. `mapper`: Postgres and SQLite tables, SQLite affinity, overrides, and scan plans.
+5. `config`, `pipeline` + `cmd/atlagen`: `ir` (prints the resolved IR as JSON) and
+   `version`, YAML config, relative-path resolution, and import-path detection.
 
 ## P3: Emitters & Static Guarantees
 
 1. Templates for `user/user.go`, `user.go`, `client.go`, `enum/enum.go`; `go/format`;
    determinism tests (generate twice, compare bytes).
-2. Golden tests: fixture JSON → expected Go files (`-update` flag to refresh).
+2. Golden tests: fixture HCL → expected Go files (`-update` flag to refresh).
 3. AOT shortcuts: `Get`, `GetMany` (single and composite, chunked), `DeleteByPK`.
 4. `atlavet` analyzer + `cmd/atlavet`, tested with `analysistest`.
 5. Compile-fail suite over generated code (see Verification).
+6. `atlagen generate` (writes files, deletes stale generated files) and `atlagen check`
+   (in-memory render, unified diff, exit status 1 on mismatch), plus `go/types`
+   validation of override `go_type` values.
 
 ## P4: Relations & Result Shapes
 
-1. Edge derivation (M2O / O2M / O2O, naming, disambiguation, overrides).
+1. Edge derivation (M2O / O2M / O2O, naming, disambiguation, `names.edges` overrides;
+   cross-schema and external FKs are skipped with a warning).
 2. `LoadEdge` runtime and generated `WithXxx` / `XxxOrErr` methods. Covers nested
    configurators, composite FKs, NULL FKs, empty parents, chunking, and `Iter`
    batching.

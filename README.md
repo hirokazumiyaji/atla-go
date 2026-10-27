@@ -3,11 +3,13 @@
 **Compile-time type-safe SQL toolkit & code generator for Go, powered by [Atlas](https://atlasgo.io/).**
 
 `atla-go` is the Go sibling of [atla](https://github.com/hirokazumiyaji/atla). Atlas
-owns the schema and migrations. `atlagen` generates typed models, column descriptors,
-query builders, and ent-style edge eager loading from `atlas schema inspect`. The
-runtime package `atla` is standard-library only and runs on `database/sql`.
+owns the schema and migrations. `atlagen` reads the HCL that
+`atlas schema inspect -u <url>` prints by default (without `--format`) and generates
+typed models, column descriptors, query builders, and ent-style edge eager loading
+from it; JSON input is rejected. The runtime package `atla` is standard-library only
+and runs on `database/sql`.
 
-> Status: design phase. See the documents below.
+> Status: P0–P2 implemented; P3 and later are in progress. See the documents below.
 
 ```go
 users, err := client.User.Query().
